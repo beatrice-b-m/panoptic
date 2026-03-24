@@ -22,7 +22,7 @@ BEAMUX_BINARY = os.getenv(
 )
 
 # Terminal font (passed to ttyd via -t fontFamily=...)
-TTYD_FONT_FAMILY = os.getenv("TTYD_FONT_FAMILY", "Hack Font Mono, Menlo, Consolas, monospace")
+TTYD_FONT_FAMILY = os.getenv("TTYD_FONT_FAMILY", "'Hack Nerd Font', 'Hack Nerd Font Mono', Menlo, Consolas, monospace")
 
 # Polling intervals (seconds)
 POLL_INTERVAL_ACTIVE = 5

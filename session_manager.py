@@ -231,6 +231,26 @@ class SessionManager:
 
     # ------------------------------------------------------- ttyd lifecycle
 
+    async def _wait_for_port_ready(self, port: int, timeout: float = 3.0) -> bool:
+        """Block until *port* accepts a TCP connection, or *timeout* expires.
+
+        Used after spawning ttyd so callers (e.g. create_session) don't
+        return a ttyd_url that isn't listening yet.
+        """
+        deadline = asyncio.get_event_loop().time() + timeout
+        while asyncio.get_event_loop().time() < deadline:
+            try:
+                _, writer = await asyncio.wait_for(
+                    asyncio.open_connection("127.0.0.1", port),
+                    timeout=0.5,
+                )
+                writer.close()
+                await writer.wait_closed()
+                return True
+            except (ConnectionRefusedError, asyncio.TimeoutError, OSError):
+                await asyncio.sleep(0.1)
+        return False
+
     async def _spawn_ttyd(self, session_name: str) -> None:
         """Allocate a port and start a ttyd process for the given session."""
         port = self.allocate_port()
@@ -248,12 +268,19 @@ class SessionManager:
             "--writable",
             "--base-path", base_path,
             "-t", f"fontFamily={TTYD_FONT_FAMILY}",
-            self._tmux_path, "attach-session", "-t", session_name,
+            self._tmux_path, "-u", "attach-session", "-t", session_name,
         ]
+
+        # Ensure the child process (and tmux client) sees a UTF-8 locale
+        # so that wide/Nerd-Font glyphs are transmitted correctly.
+        env = os.environ.copy()
+        env.setdefault("LANG", "en_US.UTF-8")
+        env.setdefault("LC_ALL", "en_US.UTF-8")
 
         try:
             process = await asyncio.create_subprocess_exec(
                 *cmd,
+                env=env,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -478,6 +505,13 @@ class SessionManager:
         if sess is None:
             return {"error": f"Session {name!r} was created but not found after polling"}
 
+        # Block until ttyd is actually accepting connections so the caller
+        # can hand the ttyd_url to the frontend without a race.
+        if sess.port is not None:
+            ready = await self._wait_for_port_ready(sess.port)
+            if not ready:
+                log.warning("ttyd for session %r not ready within timeout", name)
+
         return {
             "name": sess.name,
             "windows": sess.windows,
@@ -667,7 +701,7 @@ class SessionManager:
             f' width="{width}" height="{height}"'
             f' viewBox="0 0 {width} {height}">'
             f'<rect width="100%" height="100%" rx="6" fill="#1a1a2e"/>'
-            f'<g font-family="\'Hack Font Mono\', Menlo, Consolas, monospace"'
+            f'<g font-family="\'Hack Nerd Font\', \'Hack Nerd Font Mono\', Menlo, Consolas, monospace"'
             f' font-size="12" fill="#c8c8d0">'
             f'{body}'
             f'</g></svg>'
