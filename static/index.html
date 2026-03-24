@@ -30,13 +30,15 @@
         </main>
     </div>
 
-    <!-- Session view (terminal panes) -->
+    <!-- Session view (single terminal) -->
     <div id="session-view" class="session-view hidden">
         <div class="session-view-header">
             <button id="back-btn" class="back-btn">← Back</button>
             <h2 id="session-title" class="session-view-name"></h2>
         </div>
-        <div id="pane-grid" class="pane-grid"></div>
+        <div class="terminal-container">
+            <iframe id="terminal-iframe" class="terminal-iframe" allowfullscreen></iframe>
+        </div>
     </div>
 
     <script src="/static/app.js"></script>
