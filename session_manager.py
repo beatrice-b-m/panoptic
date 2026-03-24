@@ -520,6 +520,21 @@ class SessionManager:
             "ttyd_url": f"/terminal/{urlquote(name, safe='')}/",
         }
 
+    async def delete_session(self, name: str) -> dict:
+        """Kill a tmux session and release its ttyd process/port."""
+        if name not in self.sessions:
+            return {"error": f"Session '{name}' not found"}
+
+        attached = self.sessions[name].attached
+
+        returncode, stdout = await self._run_tmux("kill-session", "-t", name)
+        if returncode != 0:
+            return {"error": f"tmux kill-session failed: {stdout}"}
+
+        await self._kill_ttyd(name)
+
+        return {"name": name, "deleted": True, "was_attached": attached}
+
     def list_directories(self, prefix: str, limit: int = 50) -> list[str]:
         """List directories matching prefix for path autocompletion."""
         if not prefix:

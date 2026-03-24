@@ -9,6 +9,7 @@
 <body>
     <!-- Warning banner (hidden by default) -->
     <div id="warning-banner" class="warning-banner hidden"></div>
+    <div id="success-banner" class="success-banner hidden"></div>
 
     <!-- Dashboard view (session list) -->
     <div id="dashboard-view">
@@ -18,6 +19,7 @@
             <button id="new-session-btn" class="new-session-btn" title="Create new session">+ New</button>
             <div class="header-spacer"></div>
             <span id="last-refreshed" class="last-refreshed">&mdash;</span>
+            <span id="refresh-spinner" class="refresh-spinner hidden"></span>
             <button id="theme-toggle" class="theme-toggle" title="Toggle theme" aria-label="Toggle theme"></button>
         </header>
 
@@ -37,6 +39,13 @@
         <div class="session-view-header">
             <button id="back-btn" class="back-btn">&larr; Back</button>
             <h2 id="session-title" class="session-view-name"></h2>
+            <div class="header-spacer"></div>
+            <div class="session-actions-wrap">
+                <button id="session-actions-btn" class="actions-btn" title="Session actions">&#8942;</button>
+                <div id="session-actions-menu" class="actions-menu hidden">
+                    <button class="actions-menu-item destructive" id="session-view-delete-btn">Delete session</button>
+                </div>
+            </div>
         </div>
         <div class="terminal-container">
             <iframe id="terminal-iframe" class="terminal-iframe" allowfullscreen></iframe>
@@ -84,6 +93,20 @@
                     <button type="submit" id="create-session-btn" class="btn-primary">Create</button>
                 </div>
             </form>
+        </div>
+    </div>
+
+    <!-- Delete session confirmation modal -->
+    <div id="delete-session-modal" class="hidden">
+        <div class="modal-backdrop" id="delete-modal-backdrop"></div>
+        <div class="modal-content delete-modal-content">
+            <h2 class="modal-title">Delete Session</h2>
+            <p id="delete-confirm-text" class="delete-confirm-text"></p>
+            <p id="delete-warning-text" class="delete-warning-text hidden"></p>
+            <div class="form-actions">
+                <button type="button" id="cancel-delete-btn" class="btn-secondary">Cancel</button>
+                <button type="button" id="confirm-delete-btn" class="btn-danger">Delete</button>
+            </div>
         </div>
     </div>
 

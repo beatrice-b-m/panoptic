@@ -5,6 +5,18 @@ let currentPage = 1;
 let currentSession = null;  // session name while in session view, null for dashboard
 let sessionPollTimer = null;
 
+// Keyed reconciliation state: session name → card DOM element.
+const _cardMap = new Map();
+
+// Fetch sequence counter — prevents stale responses from overwriting newer UI.
+let _fetchSeq = 0;
+
+// Pending delete state for the confirmation modal.
+let _pendingDelete = null;  // { name, attached, source: 'gallery'|'session' }
+
+// Auto-hide timer for success banner.
+let _successTimer = null;
+
 // ---------------------------------------------------------------------------
 // Theme
 // ---------------------------------------------------------------------------
@@ -82,8 +94,36 @@ function showBanner(message) {
 }
 
 function hideBanner() {
-    const banner = document.getElementById('warning-banner');
-    banner.classList.add('hidden');
+    document.getElementById('warning-banner').classList.add('hidden');
+}
+
+function showSuccessBanner(message) {
+    if (_successTimer) clearTimeout(_successTimer);
+    const banner = document.getElementById('success-banner');
+    banner.textContent = message;
+    banner.classList.remove('hidden');
+    _successTimer = setTimeout(() => {
+        banner.classList.add('hidden');
+        _successTimer = null;
+    }, 4000);
+}
+
+function hideSuccessBanner() {
+    if (_successTimer) { clearTimeout(_successTimer); _successTimer = null; }
+    document.getElementById('success-banner').classList.add('hidden');
+}
+
+// ---------------------------------------------------------------------------
+// Refresh status (spinner + last-updated)
+// ---------------------------------------------------------------------------
+
+function setRefreshing(active) {
+    const spinner = document.getElementById('refresh-spinner');
+    if (active) {
+        spinner.classList.remove('hidden');
+    } else {
+        spinner.classList.add('hidden');
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -104,14 +144,20 @@ function stopSessionPolling() {
 }
 
 // ---------------------------------------------------------------------------
-// Session list
+// Session list — keyed reconciliation
 // ---------------------------------------------------------------------------
 
 async function fetchSessions(page = 1) {
+    const seq = ++_fetchSeq;
+    setRefreshing(true);
+
     try {
         const resp = await fetch(`/api/sessions?page=${page}&page_size=8`);
         if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${resp.statusText}`);
         const data = await resp.json();
+
+        // Guard: discard if a newer fetch already landed.
+        if (seq !== _fetchSeq) return;
 
         hideBanner();
         renderSessions(data);
@@ -122,7 +168,10 @@ async function fetchSessions(page = 1) {
         const refreshedEl = document.getElementById('last-refreshed');
         refreshedEl.textContent = `Updated ${formatTime(new Date())}`;
     } catch (err) {
+        if (seq !== _fetchSeq) return;
         showBanner(`Failed to fetch sessions: ${err.message}`);
+    } finally {
+        if (seq === _fetchSeq) setRefreshing(false);
     }
 }
 
@@ -131,56 +180,137 @@ function renderSessions(data) {
     const emptyState = document.getElementById('empty-state');
     const paginationEl = document.getElementById('pagination');
 
-    grid.innerHTML = '';
-
     if (data.sessions.length === 0) {
         emptyState.classList.remove('hidden');
         grid.classList.add('hidden');
         paginationEl.classList.add('hidden');
+        // Clear card map since we're showing empty state.
+        _cardMap.forEach((card) => card.remove());
+        _cardMap.clear();
         return;
     }
 
     emptyState.classList.add('hidden');
     grid.classList.remove('hidden');
 
+    // Build set of incoming session names for this page.
+    const incoming = new Set(data.sessions.map(s => s.name));
+
+    // Remove cards no longer present on this page.
+    for (const [name, card] of _cardMap) {
+        if (!incoming.has(name)) {
+            card.remove();
+            _cardMap.delete(name);
+        }
+    }
+
+    // Create or update cards, then reorder by appending in server order.
     for (const session of data.sessions) {
-        const card = document.createElement('div');
-        card.className = 'session-card';
-
-        const attachedClass = session.attached ? 'active' : '';
-        // Encode name for the onclick attribute; single-quote-safe via encodeURIComponent.
-        const safeName = encodeURIComponent(session.name);
-
-        card.innerHTML = `
-            <div class="session-thumbnail-wrap">
-                <img class="session-thumbnail"
-                     src="/api/sessions/${safeName}/thumbnail.svg?t=${thumbnailBucket()}"
-                     alt=""
-                     loading="lazy"
-                     onerror="this.style.display='none'">
-            </div>
-            <div class="session-card-body">
-                <div class="session-card-header">
-                    <span class="session-name">${escapeHtml(session.name)}</span>
-                    <span class="attached-indicator ${attachedClass}"></span>
-                </div>
-                <div class="session-meta">
-                    <span class="window-badge">${session.windows} window${session.windows !== 1 ? 's' : ''}</span>
-                    <span class="session-age">${formatAge(session.created_epoch)}</span>
-                </div>
-                <button class="open-btn" data-session="${safeName}">Open</button>
-            </div>
-        `;
-
-        // Attach listener rather than inlining onclick to avoid XSS via session names.
-        card.querySelector('.open-btn').addEventListener('click', () => {
-            openSession(session.name);
-        });
-
+        let card = _cardMap.get(session.name);
+        if (card) {
+            updateCard(card, session);
+        } else {
+            card = createCard(session);
+            _cardMap.set(session.name, card);
+        }
+        // Appending an already-parented node just moves it — no flicker.
         grid.appendChild(card);
     }
 
     renderPagination(data.page, data.pages);
+}
+
+function createCard(session) {
+    const card = document.createElement('div');
+    card.className = 'session-card';
+    card.dataset.sessionName = session.name;
+
+    const safeName = encodeURIComponent(session.name);
+    const attachedClass = session.attached ? 'active' : '';
+
+    card.innerHTML = `
+        <div class="session-thumbnail-wrap">
+            <img class="session-thumbnail"
+                 src="/api/sessions/${safeName}/thumbnail.svg?t=${thumbnailBucket()}"
+                 alt=""
+                 loading="lazy"
+                 onerror="this.style.display='none'">
+        </div>
+        <div class="session-card-body">
+            <div class="session-card-header">
+                <span class="session-name">${escapeHtml(session.name)}</span>
+                <span class="attached-indicator ${attachedClass}"></span>
+                <div class="card-actions-wrap">
+                    <button class="card-actions-btn" title="Actions">&#8942;</button>
+                    <div class="card-actions-menu actions-menu hidden">
+                        <button class="actions-menu-item destructive card-delete-btn">Delete</button>
+                    </div>
+                </div>
+            </div>
+            <div class="session-meta">
+                <span class="window-badge">${session.windows} window${session.windows !== 1 ? 's' : ''}</span>
+                <span class="session-age">${formatAge(session.created_epoch)}</span>
+            </div>
+            <button class="open-btn" data-session="${safeName}">Open</button>
+        </div>
+    `;
+
+    // Wire event listeners.
+    card.querySelector('.open-btn').addEventListener('click', () => {
+        openSession(session.name);
+    });
+    card.querySelector('.card-actions-btn').addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleCardMenu(card);
+    });
+    card.querySelector('.card-delete-btn').addEventListener('click', (e) => {
+        e.stopPropagation();
+        closeAllMenus();
+        requestSessionDelete(session.name, session.attached, 'gallery');
+    });
+
+    return card;
+}
+
+function updateCard(card, session) {
+    const safeName = encodeURIComponent(session.name);
+
+    // Update attached indicator.
+    const indicator = card.querySelector('.attached-indicator');
+    indicator.classList.toggle('active', session.attached);
+
+    // Update window count.
+    const badge = card.querySelector('.window-badge');
+    const badgeText = `${session.windows} window${session.windows !== 1 ? 's' : ''}`;
+    if (badge.textContent !== badgeText) badge.textContent = badgeText;
+
+    // Update session age.
+    const age = card.querySelector('.session-age');
+    const ageText = formatAge(session.created_epoch);
+    if (age.textContent !== ageText) age.textContent = ageText;
+
+    // Refresh thumbnail src only when the bucket changes (every ~30s).
+    const img = card.querySelector('.session-thumbnail');
+    if (img) {
+        const expectedSrc = `/api/sessions/${safeName}/thumbnail.svg?t=${thumbnailBucket()}`;
+        if (!img.src.endsWith(expectedSrc)) {
+            img.src = expectedSrc;
+            img.style.display = '';
+        }
+    }
+
+    // Update the delete button's closure with current attached state.
+    const deleteBtn = card.querySelector('.card-delete-btn');
+    if (deleteBtn) {
+        // Replace listener by cloning — avoids stale closure on `attached`.
+        const fresh = deleteBtn.cloneNode(true);
+        fresh.addEventListener('click', (e) => {
+            e.stopPropagation();
+            closeAllMenus();
+            requestSessionDelete(session.name, session.attached, 'gallery');
+        });
+        deleteBtn.replaceWith(fresh);
+    }
 }
 
 function renderPagination(page, totalPages) {
@@ -200,6 +330,9 @@ function renderPagination(page, totalPages) {
         btn.textContent = String(i);
         btn.addEventListener('click', () => {
             currentPage = i;
+            // Clear card map on page change — different page, different cards.
+            _cardMap.forEach((card) => card.remove());
+            _cardMap.clear();
             fetchSessions(i);
         });
         paginationEl.appendChild(btn);
@@ -218,6 +351,7 @@ async function openSession(sessionName) {
     document.getElementById('session-title').textContent = sessionName;
 
     stopSessionPolling();
+    closeAllMenus();
 
     history.pushState(null, '', '/?session=' + encodeURIComponent(sessionName));
 
@@ -257,6 +391,7 @@ async function loadSessionTerminal(sessionName) {
 
 function closeSession() {
     currentSession = null;
+    closeAllMenus();
 
     document.getElementById('session-view').classList.add('hidden');
     document.getElementById('dashboard-view').classList.remove('hidden');
@@ -281,6 +416,102 @@ function escapeHtml(str) {
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#39;');
+}
+
+// ---------------------------------------------------------------------------
+// Dropdown menus (card + session-view)
+// ---------------------------------------------------------------------------
+
+function toggleCardMenu(card) {
+    const menu = card.querySelector('.card-actions-menu');
+    const wasOpen = !menu.classList.contains('hidden');
+    closeAllMenus();
+    if (!wasOpen) menu.classList.remove('hidden');
+}
+
+function toggleSessionViewMenu() {
+    const menu = document.getElementById('session-actions-menu');
+    const wasOpen = !menu.classList.contains('hidden');
+    closeAllMenus();
+    if (!wasOpen) menu.classList.remove('hidden');
+}
+
+function closeAllMenus() {
+    document.querySelectorAll('.actions-menu').forEach(m => m.classList.add('hidden'));
+}
+
+// ---------------------------------------------------------------------------
+// Delete session flow
+// ---------------------------------------------------------------------------
+
+function requestSessionDelete(name, attached, source) {
+    _pendingDelete = { name, attached, source };
+
+    const modal = document.getElementById('delete-session-modal');
+    const confirmText = document.getElementById('delete-confirm-text');
+    const warningText = document.getElementById('delete-warning-text');
+    const confirmBtn = document.getElementById('confirm-delete-btn');
+
+    confirmText.textContent = `Are you sure you want to delete session "${name}"? This will kill the tmux session and cannot be undone.`;
+
+    if (attached) {
+        warningText.textContent = 'This session is currently attached. Deleting it will disconnect any active clients.';
+        warningText.classList.remove('hidden');
+    } else {
+        warningText.classList.add('hidden');
+    }
+
+    confirmBtn.disabled = false;
+    confirmBtn.textContent = 'Delete';
+    modal.classList.remove('hidden');
+}
+
+function closeDeleteModal() {
+    document.getElementById('delete-session-modal').classList.add('hidden');
+    _pendingDelete = null;
+}
+
+async function confirmDeleteSession() {
+    if (!_pendingDelete) return;
+    const { name, source } = _pendingDelete;
+
+    const confirmBtn = document.getElementById('confirm-delete-btn');
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = 'Deleting\u2026';
+
+    try {
+        const resp = await fetch(`/api/sessions/${encodeURIComponent(name)}`, {
+            method: 'DELETE',
+        });
+        const data = await resp.json();
+
+        if (!resp.ok) {
+            closeDeleteModal();
+            showBanner(data.error || `Failed to delete session: HTTP ${resp.status}`);
+            return;
+        }
+
+        closeDeleteModal();
+
+        if (source === 'session' && currentSession === name) {
+            // Deleting the session we're currently viewing — return to gallery.
+            closeSession();
+            showSuccessBanner(`Session "${name}" deleted.`);
+        } else {
+            // Gallery view: remove card immediately, then reconcile via poll.
+            const card = _cardMap.get(name);
+            if (card) {
+                card.remove();
+                _cardMap.delete(name);
+            }
+            showSuccessBanner(`Session "${name}" deleted.`);
+            // Trigger an immediate refresh to reconcile counts and pagination.
+            fetchSessions(currentPage);
+        }
+    } catch (err) {
+        closeDeleteModal();
+        showBanner(`Failed to delete session: ${err.message}`);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -667,11 +898,48 @@ document.addEventListener('DOMContentLoaded', () => {
     // Layout spec preview on input
     document.getElementById('layout-spec-input').addEventListener('input', updateLayoutPreview);
 
-    // Close modal on Escape
+    // Session-view actions dropdown
+    document.getElementById('session-actions-btn').addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleSessionViewMenu();
+    });
+    document.getElementById('session-view-delete-btn').addEventListener('click', (e) => {
+        e.stopPropagation();
+        closeAllMenus();
+        if (currentSession) {
+            // Look up attached state from the card map or fetch it.
+            // The session-view doesn't cache attached state, so default to
+            // checking the card if it exists; otherwise assume possibly attached.
+            const card = _cardMap.get(currentSession);
+            const indicator = card ? card.querySelector('.attached-indicator') : null;
+            const attached = indicator ? indicator.classList.contains('active') : true;
+            requestSessionDelete(currentSession, attached, 'session');
+        }
+    });
+
+    // Delete confirmation modal
+    document.getElementById('confirm-delete-btn').addEventListener('click', confirmDeleteSession);
+    document.getElementById('cancel-delete-btn').addEventListener('click', closeDeleteModal);
+    document.getElementById('delete-modal-backdrop').addEventListener('click', closeDeleteModal);
+
+    // Global: close menus on outside click
+    document.addEventListener('click', () => {
+        closeAllMenus();
+    });
+
+    // Global: Escape key closes modals and menus
     document.addEventListener('keydown', (e) => {
         if (e.key === 'Escape') {
-            const modal = document.getElementById('new-session-modal');
-            if (!modal.classList.contains('hidden')) {
+            closeAllMenus();
+
+            const deleteModal = document.getElementById('delete-session-modal');
+            if (!deleteModal.classList.contains('hidden')) {
+                closeDeleteModal();
+                return;
+            }
+
+            const newModal = document.getElementById('new-session-modal');
+            if (!newModal.classList.contains('hidden')) {
                 closeNewSessionModal();
             }
         }

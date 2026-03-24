@@ -189,6 +189,20 @@ async def handle_create_session(request: web.Request) -> web.Response:
     return web.json_response(result, status=201)
 
 
+async def handle_delete_session(request: web.Request) -> web.Response:
+    """Delete (kill) an existing tmux session."""
+    mgr: SessionManager = request.app["session_manager"]
+    session_name = request.match_info["session_name"]
+
+    result = await mgr.delete_session(session_name)
+
+    if "error" in result:
+        status = 404 if "not found" in result["error"] else 500
+        return web.json_response(result, status=status)
+
+    return web.json_response(result)
+
+
 async def handle_path_completion(request: web.Request) -> web.Response:
     """Return directory completions for a path prefix."""
     mgr: SessionManager = request.app["session_manager"]
@@ -438,6 +452,7 @@ def build_app() -> web.Application:
     app.router.add_get("/api/sessions/{session_name}/panes", handle_panes)
     app.router.add_get("/api/sessions/{session_name}/thumbnail.svg", handle_thumbnail)
     app.router.add_post("/api/sessions", handle_create_session)
+    app.router.add_delete("/api/sessions/{session_name}", handle_delete_session)
     app.router.add_get("/api/completions/path", handle_path_completion)
     app.router.add_get("/api/sessions/{session_name}", handle_session_detail)
     app.router.add_get("/api/health", handle_health)
