@@ -10,11 +10,14 @@ A lightweight web dashboard that discovers your tmux sessions and exposes each o
 - **Single terminal view** -- clicking a session opens one full ttyd terminal showing the real tmux layout (panes, splits, status bar); up to 19 concurrent sessions
 - **Session thumbnails** -- each gallery card shows a live text snapshot (SVG) of the session, refreshed approximately every 30 seconds
 - **Auto-refresh** -- dashboard reflects session create/destroy in real time without a page reload
-- **Dark theme** -- design-token-based dark UI inspired by the smart-home-interface design system
+- **Light/dark theme** -- toggle in the header; persists to localStorage; follows `prefers-color-scheme` when no explicit choice is stored
 - **HTTPS via Tailscale** -- optional TLS termination using Tailscale-provisioned certificates; all ttyd traffic is reverse-proxied through a single port
 - **Configurable terminal font** -- terminal font family defaults to Hack Font Mono and is overridable via environment variable
 - **Always-on via launchd** -- survives reboots; crashes restart automatically
 - **Remote access** -- bind on `0.0.0.0`; reach from any device on your Tailscale network
+- **Create sessions from UI** -- click "+New" to spawn a tmux session with optional working directory and pane layout
+- **Pane layout support** -- row or column layouts via colon-separated spec (e.g. `2:1:3`); live CSS grid preview before creation
+- **Directory autocompletion** -- server-side path completion when typing a working directory for new sessions
 
 ## Prerequisites
 
@@ -76,6 +79,7 @@ All tuneable constants live in `config.py`. Most can also be set via environment
 | `TLS_CERT` | *(empty)* | `TLS_CERT` | Path to TLS certificate file (PEM) |
 | `TLS_KEY` | *(empty)* | `TLS_KEY` | Path to TLS private key file (PEM) |
 | `LOG_LEVEL` | `INFO` | -- | Python logging level |
+| `BEAMUX_BINARY` | `~/AgentFiles/.../beamux` | `BEAMUX_BINARY` | Path to beamux script for pane layout creation |
 
 Edit `config.py` or set environment variables and restart the service for changes to take effect.
 
@@ -145,8 +149,10 @@ Tailscale certificates are valid for ~90 days. Re-run `tailscale cert` periodica
 Browser
   |  HTTP(S) GET /                              -> dashboard (index.html + app.js)
   |  HTTP(S) GET /api/sessions                  -> JSON list of live sessions
+  |  HTTP(S) POST /api/sessions                 -> create new session
   |  HTTP(S) GET /api/sessions/{name}           -> session metadata + ttyd_url
   |  HTTP(S) GET /api/sessions/{name}/thumbnail.svg -> SVG snapshot
+  |  HTTP(S) GET /api/completions/path?prefix=... -> directory autocompletion
   |  HTTP(S) + WebSocket /terminal/{name}/...   -> reverse proxy to ttyd
   v
 server.py  (aiohttp, port 7680, optional TLS)
