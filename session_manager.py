@@ -305,6 +305,29 @@ class SessionManager:
 
         log.info("Killed ttyd for session %r (pid=%s)", session_name, sess.ttyd_pid)
 
+    async def _kill_stale_ttyd(self) -> None:
+        """Kill orphaned ttyd processes left over from a previous server run.
+
+        Must be called before the first poll so freed ports are available
+        in the pool.  Matches only ttyd processes that were spawned with
+        `tmux attach-session` (our unique command-line signature).
+        """
+        try:
+            # Find orphaned ttyd processes from a prior run.
+            proc = await asyncio.create_subprocess_exec(
+                "pkill", "-f", "ttyd.*tmux attach-session",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await proc.wait()
+            if proc.returncode == 0:
+                log.info("Killed stale ttyd processes from a previous run")
+                # Brief pause so the OS releases the listening sockets.
+                await asyncio.sleep(0.5)
+        except FileNotFoundError:
+            log.debug("pkill not available; skipping orphan cleanup")
+
+
     # --------------------------------------------------------- cleanup hook
 
     async def cleanup(self) -> None:

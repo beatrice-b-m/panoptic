@@ -349,6 +349,11 @@ async def on_startup(app: web.Application) -> None:
     # Shared HTTP client for the reverse proxy.
     app["client_session"] = aiohttp.ClientSession()
 
+    # Kill orphaned ttyd processes from a previous server run so their
+    # ports are freed before we start spawning new ones.
+    await mgr._kill_stale_ttyd()
+
+
     # Run an initial poll immediately so the API has data before the first
     # client connects.
     await mgr.poll_sessions()
