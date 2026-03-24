@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import shutil
 import signal
 from collections import deque
 from dataclasses import dataclass, field
@@ -14,6 +15,7 @@ from config import (
     POLL_INTERVAL_ACTIVE,
     POLL_INTERVAL_IDLE,
     SESSION_PAGE_SIZE,
+    TMUX_BINARY,
     TTYD_BIND_HOST,
     TTYD_BINARY,
     TTYD_PORT_RANGE_END,
@@ -47,6 +49,15 @@ class SessionManager:
 
         self._poll_task: asyncio.Task | None = None
 
+        # Resolve binaries to absolute paths once so ttyd's child process
+        # does not depend on PATH propagation (which fails under launchd).
+        self._ttyd_path = shutil.which(TTYD_BINARY) or TTYD_BINARY
+        self._tmux_path = shutil.which(TMUX_BINARY) or TMUX_BINARY
+        if self._ttyd_path == TTYD_BINARY:
+            log.warning("Could not resolve ttyd to absolute path; using %r", TTYD_BINARY)
+        if self._tmux_path == TMUX_BINARY:
+            log.warning("Could not resolve tmux to absolute path; using %r", TMUX_BINARY)
+
     # ------------------------------------------------------------------ ports
 
     def allocate_port(self) -> int | None:
@@ -76,7 +87,7 @@ class SessionManager:
 
     async def _poll_sessions_inner(self) -> None:
         proc = await asyncio.create_subprocess_exec(
-            "tmux",
+            self._tmux_path,
             "list-sessions",
             "-F",
             "#{session_name}|#{session_windows}|#{session_attached}|#{session_created}",
@@ -157,7 +168,7 @@ class SessionManager:
         using the returned port and the inbound request host.
         """
         proc = await asyncio.create_subprocess_exec(
-            "tmux",
+            self._tmux_path,
             "list-panes",
             "-t", session_name,
             "-F", "#{pane_id}|#{pane_index}|#{pane_width}|#{pane_height}|#{pane_active}|#{pane_title}",
@@ -210,13 +221,12 @@ class SessionManager:
             return
 
         cmd = [
-            TTYD_BINARY,
+            self._ttyd_path,
             "--port", str(port),
             "--interface", TTYD_BIND_HOST,
-            "--once",
             "--writable",
             "--title-format", f"tmux: {session_name}",
-            "tmux", "attach-session", "-t", session_name,
+            self._tmux_path, "attach-session", "-t", session_name,
         ]
 
         try:
@@ -226,7 +236,7 @@ class SessionManager:
                 stderr=asyncio.subprocess.PIPE,
             )
         except FileNotFoundError:
-            log.error("ttyd binary not found (%r); session %r will have no terminal", TTYD_BINARY, session_name)
+            log.error("ttyd binary not found (%r); session %r will have no terminal", self._ttyd_path, session_name)
             self.release_port(port)
             return
         except Exception:

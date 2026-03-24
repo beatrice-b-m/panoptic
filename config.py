@@ -9,6 +9,7 @@ TTYD_PORT_RANGE_START = 7681
 TTYD_PORT_RANGE_END = 7699
 TTYD_BIND_HOST = "0.0.0.0"
 TTYD_BINARY = "ttyd"
+TMUX_BINARY = "tmux"
 
 # Polling intervals (seconds)
 POLL_INTERVAL_ACTIVE = 5
