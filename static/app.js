@@ -20,6 +20,16 @@ function formatAge(epochSeconds) {
     return `${diffDays}d ago`;
 }
 
+/**
+ * Returns a timestamp bucket that changes every ~30 seconds.
+ * Used as a cache-buster for thumbnail URLs so the browser
+ * re-fetches roughly every 30s without hammering on every poll.
+ */
+function thumbnailBucket() {
+    return Math.floor(Date.now() / 30000);
+}
+
+
 function formatTime(date) {
     const hh = String(date.getHours()).padStart(2, '0');
     const mm = String(date.getMinutes()).padStart(2, '0');
@@ -104,15 +114,24 @@ function renderSessions(data) {
         const safeName = encodeURIComponent(session.name);
 
         card.innerHTML = `
-            <div class="session-card-header">
-                <span class="session-name">${escapeHtml(session.name)}</span>
-                <span class="attached-indicator ${attachedClass}"></span>
+            <div class="session-thumbnail-wrap">
+                <img class="session-thumbnail"
+                     src="/api/sessions/${safeName}/thumbnail.svg?t=${thumbnailBucket()}"
+                     alt=""
+                     loading="lazy"
+                     onerror="this.style.display='none'">
             </div>
-            <div class="session-meta">
-                <span class="window-badge">${session.windows} window${session.windows !== 1 ? 's' : ''}</span>
-                <span class="session-age">${formatAge(session.created_epoch)}</span>
+            <div class="session-card-body">
+                <div class="session-card-header">
+                    <span class="session-name">${escapeHtml(session.name)}</span>
+                    <span class="attached-indicator ${attachedClass}"></span>
+                </div>
+                <div class="session-meta">
+                    <span class="window-badge">${session.windows} window${session.windows !== 1 ? 's' : ''}</span>
+                    <span class="session-age">${formatAge(session.created_epoch)}</span>
+                </div>
+                <button class="open-btn" data-session="${safeName}">Open</button>
             </div>
-            <button class="open-btn" data-session="${safeName}">Open</button>
         `;
 
         // Attach listener rather than inlining onclick to avoid XSS via session names.

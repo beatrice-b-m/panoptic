@@ -3,13 +3,17 @@ from __future__ import annotations
 """Session manager: tracks tmux sessions and owns ttyd subprocess lifecycle."""
 
 import asyncio
+import html as html_mod
 import logging
 import math
+import re
 import shutil
 import signal
+import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable
+from urllib.parse import quote as urlquote
 
 from config import (
     POLL_INTERVAL_ACTIVE,
@@ -18,6 +22,7 @@ from config import (
     TMUX_BINARY,
     TTYD_BIND_HOST,
     TTYD_BINARY,
+    TTYD_FONT_FAMILY,
     TTYD_PORT_RANGE_END,
     TTYD_PORT_RANGE_START,
 )
@@ -25,6 +30,14 @@ from config import (
 log = logging.getLogger(__name__)
 
 
+
+# Thumbnail snapshot: cached captured-pane text per session.
+SNAPSHOT_FRESHNESS_SECS = 30
+SNAPSHOT_MAX_LINES = 24
+SNAPSHOT_MAX_COLS = 80
+
+# Strip ANSI escape sequences (CSI, OSC, and simple ESC sequences).
+_ANSI_RE = re.compile(r"\x1b(?:\[[0-9;?]*[A-Za-z]|\].*?(?:\x07|\x1b\\)|[()][AB012]|[>=<78HMDE])")
 @dataclass
 class SessionInfo:
     name: str
@@ -48,6 +61,9 @@ class SessionManager:
         self.sessions: dict[str, SessionInfo] = {}
 
         self._poll_task: asyncio.Task | None = None
+
+        # Thumbnail snapshot cache: session_name -> (text, timestamp).
+        self._snapshot_cache: dict[str, tuple[str, float]] = {}
 
         # Resolve binaries to absolute paths once so ttyd's child process
         # does not depend on PATH propagation (which fails under launchd).
@@ -220,11 +236,14 @@ class SessionManager:
             )
             return
 
+        base_path = f"/terminal/{urlquote(session_name, safe='')}/"
         cmd = [
             self._ttyd_path,
             "--port", str(port),
             "--interface", TTYD_BIND_HOST,
             "--writable",
+            "--base-path", base_path,
+            "-t", f"fontFamily={TTYD_FONT_FAMILY}",
             self._tmux_path, "attach-session", "-t", session_name,
         ]
 
@@ -256,6 +275,8 @@ class SessionManager:
         should not reference session_name after this returns.
         """
         sess = self.sessions.pop(session_name, None)
+
+        self._snapshot_cache.pop(session_name, None)
         if sess is None:
             return
 
@@ -348,3 +369,91 @@ class SessionManager:
             "page_size": page_size,
             "pages": pages,
         }
+
+
+    # --------------------------------------------------- session thumbnails
+
+    async def get_thumbnail_svg(self, session_name: str) -> str | None:
+        """Return an SVG thumbnail for the session, or None if unknown.
+
+        Uses a cached snapshot if fresher than SNAPSHOT_FRESHNESS_SECS;
+        otherwise re-captures from tmux.
+        """
+        if session_name not in self.sessions:
+            return None
+
+        cached = self._snapshot_cache.get(session_name)
+        if cached is not None:
+            text, ts = cached
+            if time.monotonic() - ts < SNAPSHOT_FRESHNESS_SECS:
+                return self._render_svg(text)
+
+        text = await self._capture_pane(session_name)
+        if text is None:
+            # Capture failed — return stale cache if available, else a fallback.
+            if cached is not None:
+                return self._render_svg(cached[0])
+            return self._render_svg("(no snapshot available)")
+
+        self._snapshot_cache[session_name] = (text, time.monotonic())
+        return self._render_svg(text)
+
+    async def _capture_pane(self, session_name: str) -> str | None:
+        """Run tmux capture-pane and return cleaned text, or None on failure."""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                self._tmux_path,
+                "capture-pane", "-p", "-t", session_name,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5.0)
+        except (asyncio.TimeoutError, FileNotFoundError, OSError) as exc:
+            log.warning("capture-pane failed for %r: %s", session_name, exc)
+            return None
+
+        if proc.returncode != 0:
+            return None
+
+        raw = stdout.decode(errors="replace")
+        # Strip ANSI escape sequences.
+        cleaned = _ANSI_RE.sub("", raw)
+        # Truncate to max dimensions for a compact thumbnail.
+        lines = cleaned.splitlines()[:SNAPSHOT_MAX_LINES]
+        truncated = [line[:SNAPSHOT_MAX_COLS] for line in lines]
+        return "\n".join(truncated)
+
+    @staticmethod
+    def _render_svg(text: str) -> str:
+        """Produce a dark-bg monospace SVG from plain text."""
+        lines = text.splitlines()
+        # Pad to minimum height so empty sessions don't collapse.
+        while len(lines) < 4:
+            lines.append("")
+
+        char_w = 7.2  # approximate width of a monospace char at 12px
+        char_h = 16   # line height
+        pad_x = 10
+        pad_y = 10
+        width = int(SNAPSHOT_MAX_COLS * char_w + 2 * pad_x)
+        height = len(lines) * char_h + 2 * pad_y
+
+        escaped_lines: list[str] = []
+        for i, line in enumerate(lines):
+            y = pad_y + (i + 1) * char_h
+            safe = html_mod.escape(line) if line else "&#160;"
+            escaped_lines.append(
+                f'<text x="{pad_x}" y="{y}" xml:space="preserve">{safe}</text>'
+            )
+
+        body = "\n".join(escaped_lines)
+        return (
+            f'<svg xmlns="http://www.w3.org/2000/svg"'
+            f' width="{width}" height="{height}"'
+            f' viewBox="0 0 {width} {height}">'
+            f'<rect width="100%" height="100%" rx="6" fill="#1a1a2e"/>'
+            f'<g font-family="\'Hack Font Mono\', Menlo, Consolas, monospace"'
+            f' font-size="12" fill="#c8c8d0">'
+            f'{body}'
+            f'</g></svg>'
+        )
