@@ -88,6 +88,30 @@ async def handle_panes(request: web.Request) -> web.Response:
     return web.json_response({"session": session_name, "panes": panes})
 
 
+
+async def handle_session_detail(request: web.Request) -> web.Response:
+    """Return metadata and ttyd_url for a single session."""
+    mgr: SessionManager = request.app["session_manager"]
+    session_name = request.match_info["session_name"]
+
+    sess = mgr.sessions.get(session_name)
+    if sess is None:
+        return web.json_response(
+            {"error": f"Session '{session_name}' not found"},
+            status=404,
+        )
+
+    host = request.host.split(":")[0]
+    ttyd_url = f"http://{host}:{sess.port}" if sess.port else None
+
+    return web.json_response({
+        "name": sess.name,
+        "windows": sess.windows,
+        "attached": sess.attached,
+        "created_epoch": sess.created_epoch,
+        "ttyd_url": ttyd_url,
+    })
+
 async def handle_health(request: web.Request) -> web.Response:
     mgr: SessionManager = request.app["session_manager"]
     uptime = time.monotonic() - request.app["start_time"]
@@ -161,6 +185,7 @@ def build_app() -> web.Application:
     app.router.add_get("/", handle_index)
     app.router.add_get("/api/sessions", handle_sessions)
     app.router.add_get("/api/sessions/{session_name}/panes", handle_panes)
+    app.router.add_get("/api/sessions/{session_name}", handle_session_detail)
     app.router.add_get("/api/health", handle_health)
 
     # Static files
