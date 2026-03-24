@@ -15,14 +15,16 @@
         <header class="header">
             <h1 class="header-title">tmux<span>-dash</span></h1>
             <span id="session-count" class="session-count-badge">0 sessions</span>
+            <button id="new-session-btn" class="new-session-btn" title="Create new session">+ New</button>
             <div class="header-spacer"></div>
-            <span id="last-refreshed" class="last-refreshed">—</span>
+            <span id="last-refreshed" class="last-refreshed">&mdash;</span>
+            <button id="theme-toggle" class="theme-toggle" title="Toggle theme" aria-label="Toggle theme"></button>
         </header>
 
         <main class="main-content">
             <div id="session-grid" class="session-grid"></div>
             <div id="empty-state" class="empty-state hidden">
-                <div class="empty-state-icon">ℹ️</div>
+                <div class="empty-state-icon">&#8505;&#65039;</div>
                 <div class="empty-state-message">No active tmux sessions found.</div>
                 <div class="empty-state-sub">Sessions will appear here when tmux is running.</div>
             </div>
@@ -33,11 +35,55 @@
     <!-- Session view (single terminal) -->
     <div id="session-view" class="session-view hidden">
         <div class="session-view-header">
-            <button id="back-btn" class="back-btn">← Back</button>
+            <button id="back-btn" class="back-btn">&larr; Back</button>
             <h2 id="session-title" class="session-view-name"></h2>
         </div>
         <div class="terminal-container">
             <iframe id="terminal-iframe" class="terminal-iframe" allowfullscreen></iframe>
+        </div>
+    </div>
+
+    <!-- New session modal -->
+    <div id="new-session-modal" class="hidden">
+        <div class="modal-backdrop" id="modal-backdrop"></div>
+        <div class="modal-content">
+            <h2 class="modal-title">New Session</h2>
+            <form id="new-session-form" autocomplete="off">
+                <div class="form-group">
+                    <label for="session-name-input">Session Name</label>
+                    <input id="session-name-input" class="form-input" type="text"
+                           placeholder="my-session" required>
+                    <div id="session-name-error" class="form-error hidden"></div>
+                </div>
+                <div class="form-group">
+                    <label for="session-cwd-input">Working Directory</label>
+                    <div class="autocomplete-wrap">
+                        <input id="session-cwd-input" class="form-input" type="text"
+                               placeholder="/path/to/project">
+                        <div id="cwd-completions" class="autocomplete-dropdown hidden"></div>
+                    </div>
+                    <div class="form-hint">Optional. Leave blank for default home directory.</div>
+                </div>
+                <div class="form-group">
+                    <label>Pane Layout</label>
+                    <div class="layout-type-toggle" id="layout-type-toggle">
+                        <button type="button" class="layout-type-btn active" data-layout="none">None</button>
+                        <button type="button" class="layout-type-btn" data-layout="row">Row</button>
+                        <button type="button" class="layout-type-btn" data-layout="col">Column</button>
+                    </div>
+                </div>
+                <div id="layout-spec-group" class="form-group hidden">
+                    <label for="layout-spec-input">Layout Spec</label>
+                    <input id="layout-spec-input" class="form-input" type="text"
+                           placeholder="2:1:3">
+                    <div class="form-hint">Colon-separated pane counts per row/column (e.g. 2:1 = two panes, then one).</div>
+                    <div id="layout-preview" class="layout-preview hidden"></div>
+                </div>
+                <div class="form-actions">
+                    <button type="button" id="cancel-new-session" class="btn-secondary">Cancel</button>
+                    <button type="submit" id="create-session-btn" class="btn-primary">Create</button>
+                </div>
+            </form>
         </div>
     </div>
 

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import html as html_mod
+import os
+from pathlib import Path
 import logging
 import math
 import re
@@ -20,6 +22,7 @@ from config import (
     POLL_INTERVAL_IDLE,
     SESSION_PAGE_SIZE,
     TMUX_BINARY,
+    BEAMUX_BINARY,
     TTYD_BIND_HOST,
     TTYD_BINARY,
     TTYD_FONT_FAMILY,
@@ -38,6 +41,7 @@ SNAPSHOT_MAX_COLS = 80
 
 # Strip ANSI escape sequences (CSI, OSC, and simple ESC sequences).
 _ANSI_RE = re.compile(r"\x1b(?:\[[0-9;?]*[A-Za-z]|\].*?(?:\x07|\x1b\\)|[()][AB012]|[>=<78HMDE])")
+SESSION_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 @dataclass
 class SessionInfo:
     name: str
@@ -327,6 +331,194 @@ class SessionManager:
         except FileNotFoundError:
             log.debug("pkill not available; skipping orphan cleanup")
 
+
+    async def _run_tmux(self, *args: str) -> tuple[int, str]:
+        """Run a tmux subcommand and return (returncode, stdout_stripped)."""
+        proc = await asyncio.create_subprocess_exec(
+            self._tmux_path, *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await proc.communicate()
+        return proc.returncode, stdout.decode().strip()
+
+    async def _apply_row_layout(self, session_name: str, counts: list[int]) -> bool:
+        """Port of beamux apply_row_layout. Split rows first, then columns per row."""
+        rc, pane_id = await self._run_tmux(
+            "display-message", "-p", "-t", f"{session_name}:0.0", "#{pane_id}"
+        )
+        if rc != 0:
+            return False
+
+        n_rows = len(counts)
+        row_anchors: list[str] = [pane_id]
+
+        # Create additional rows by splitting vertically.
+        for _ in range(1, n_rows):
+            rc, new_pane = await self._run_tmux(
+                "split-window", "-v", "-t", f"{session_name}:0", "-P", "-F", "#{pane_id}"
+            )
+            if rc != 0:
+                return False
+            row_anchors.append(new_pane)
+
+        rc, _ = await self._run_tmux("select-layout", "-t", f"{session_name}:0", "even-vertical")
+        if rc != 0:
+            return False
+
+        # For each row, split horizontally counts[r]-1 times.
+        for r, anchor in enumerate(row_anchors):
+            for _ in range(counts[r] - 1):
+                rc, _ = await self._run_tmux("split-window", "-h", "-t", anchor)
+                if rc != 0:
+                    return False
+
+        await self._run_tmux("select-pane", "-t", f"{session_name}:0.0")
+        return True
+
+    async def _apply_col_layout(self, session_name: str, counts: list[int]) -> bool:
+        """Mirror of _apply_row_layout with columns as the primary split axis."""
+        rc, pane_id = await self._run_tmux(
+            "display-message", "-p", "-t", f"{session_name}:0.0", "#{pane_id}"
+        )
+        if rc != 0:
+            return False
+
+        n_cols = len(counts)
+        col_anchors: list[str] = [pane_id]
+
+        # Create additional columns by splitting horizontally.
+        for _ in range(1, n_cols):
+            rc, new_pane = await self._run_tmux(
+                "split-window", "-h", "-t", f"{session_name}:0", "-P", "-F", "#{pane_id}"
+            )
+            if rc != 0:
+                return False
+            col_anchors.append(new_pane)
+
+        rc, _ = await self._run_tmux("select-layout", "-t", f"{session_name}:0", "even-horizontal")
+        if rc != 0:
+            return False
+
+        # For each column, split vertically counts[c]-1 times.
+        for c, anchor in enumerate(col_anchors):
+            for _ in range(counts[c] - 1):
+                rc, _ = await self._run_tmux("split-window", "-v", "-t", anchor)
+                if rc != 0:
+                    return False
+
+        await self._run_tmux("select-pane", "-t", f"{session_name}:0.0")
+        return True
+
+    @staticmethod
+    def _parse_layout_spec(spec: str) -> list[int] | None:
+        """Parse colon-separated positive integers. Returns None on invalid input."""
+        try:
+            counts = [int(x) for x in spec.split(":")]
+            if counts and all(c >= 1 for c in counts):
+                return counts
+        except ValueError:
+            pass
+        return None
+
+    async def create_session(
+        self,
+        name: str,
+        cwd: str | None = None,
+        layout_type: str | None = None,
+        layout_spec: str | None = None,
+    ) -> dict:
+        """Create a new tmux session. Returns session info dict on success, or {\"error\": \"...\"} on failure."""
+        if not SESSION_NAME_RE.match(name):
+            return {"error": f"Invalid session name {name!r}: must match ^[A-Za-z0-9_-]+$"}
+
+        if name in self.sessions:
+            return {"error": f"Session {name!r} already exists"}
+
+        if cwd is not None:
+            cwd = os.path.expanduser(cwd)
+            if not os.path.isdir(cwd):
+                return {"error": f"cwd {cwd!r} is not a directory"}
+
+        counts: list[int] | None = None
+        if layout_type is not None:
+            if layout_type not in ("row", "col"):
+                return {"error": f"Invalid layout_type {layout_type!r}: must be 'row' or 'col'"}
+            if not layout_spec:
+                return {"error": "layout_spec is required when layout_type is provided"}
+            counts = self._parse_layout_spec(layout_spec)
+            if counts is None:
+                return {"error": f"Invalid layout_spec {layout_spec!r}: must be colon-separated positive integers"}
+
+        cmd = [self._tmux_path, "new-session", "-d", "-s", name]
+        if cwd is not None:
+            cmd += ["-c", cwd]
+
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            return {"error": f"tmux new-session failed: {stderr.decode().strip()}"}
+
+        if layout_type is not None and counts is not None:
+            ok = await (
+                self._apply_row_layout(name, counts)
+                if layout_type == "row"
+                else self._apply_col_layout(name, counts)
+            )
+            if not ok:
+                log.warning("Layout application failed for session %r", name)
+
+        await self.poll_sessions()
+
+        sess = self.sessions.get(name)
+        if sess is None:
+            return {"error": f"Session {name!r} was created but not found after polling"}
+
+        return {
+            "name": sess.name,
+            "windows": sess.windows,
+            "attached": sess.attached,
+            "created_epoch": sess.created_epoch,
+            "ttyd_url": f"/terminal/{urlquote(name, safe='')}/",
+        }
+
+    def list_directories(self, prefix: str, limit: int = 50) -> list[str]:
+        """List directories matching prefix for path autocompletion."""
+        if not prefix:
+            prefix = os.path.expanduser("~/")
+        prefix = os.path.expanduser(prefix)
+
+        if prefix.endswith("/"):
+            parent = Path(prefix)
+            partial = ""
+        else:
+            p = Path(prefix)
+            parent = p.parent
+            partial = p.name
+
+        if not parent.is_dir():
+            return []
+
+        results: list[str] = []
+        try:
+            for entry in sorted(parent.iterdir()):
+                if entry.is_symlink():
+                    continue
+                if not entry.is_dir():
+                    continue
+                if partial and not entry.name.lower().startswith(partial.lower()):
+                    continue
+                results.append(str(entry) + "/")
+                if len(results) >= limit:
+                    break
+        except PermissionError:
+            return []
+
+        return results
 
     # --------------------------------------------------------- cleanup hook
 

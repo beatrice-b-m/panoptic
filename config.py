@@ -14,6 +14,13 @@ TTYD_BIND_HOST = "0.0.0.0"
 TTYD_BINARY = "ttyd"
 TMUX_BINARY = "tmux"
 
+# beamux — used for pane-layout creation when shelling out.
+# Defaults to the local bea-sh tools path; override via env var.
+BEAMUX_BINARY = os.getenv(
+    "BEAMUX_BINARY",
+    os.path.expanduser("~/AgentFiles/projects/bea-sh/tools/beamux/beamux"),
+)
+
 # Terminal font (passed to ttyd via -t fontFamily=...)
 TTYD_FONT_FAMILY = os.getenv("TTYD_FONT_FAMILY", "Hack Font Mono, Menlo, Consolas, monospace")
 

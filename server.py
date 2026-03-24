@@ -160,6 +160,42 @@ async def handle_health(request: web.Request) -> web.Response:
     })
 
 
+
+async def handle_create_session(request: web.Request) -> web.Response:
+    """Create a new tmux session."""
+    mgr: SessionManager = request.app["session_manager"]
+
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON body"}, status=400)
+
+    name = body.get("name", "").strip()
+    if not name:
+        return web.json_response({"error": "'name' is required"}, status=400)
+
+    cwd = body.get("cwd") or None
+    layout_type = body.get("layout_type") or None
+    layout_spec = body.get("layout_spec") or None
+
+    result = await mgr.create_session(
+        name, cwd=cwd, layout_type=layout_type, layout_spec=layout_spec
+    )
+
+    if "error" in result:
+        status = 409 if "already exists" in result["error"] else 400
+        return web.json_response(result, status=status)
+
+    return web.json_response(result, status=201)
+
+
+async def handle_path_completion(request: web.Request) -> web.Response:
+    """Return directory completions for a path prefix."""
+    mgr: SessionManager = request.app["session_manager"]
+    prefix = request.query.get("prefix", "")
+    completions = mgr.list_directories(prefix)
+    return web.json_response({"completions": completions})
+
 # ---------------------------------------------------------------------------
 # ttyd reverse proxy — forwards HTTP and WebSocket to the per-session ttyd
 # ---------------------------------------------------------------------------
@@ -401,6 +437,8 @@ def build_app() -> web.Application:
     app.router.add_get("/api/sessions", handle_sessions)
     app.router.add_get("/api/sessions/{session_name}/panes", handle_panes)
     app.router.add_get("/api/sessions/{session_name}/thumbnail.svg", handle_thumbnail)
+    app.router.add_post("/api/sessions", handle_create_session)
+    app.router.add_get("/api/completions/path", handle_path_completion)
     app.router.add_get("/api/sessions/{session_name}", handle_session_detail)
     app.router.add_get("/api/health", handle_health)
 

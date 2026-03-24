@@ -1,10 +1,10 @@
-/* tmux-dash — restyled dark theme
-   Design system adapted from smart-home-interface reference app. */
+/* tmux-dash — dual-theme design system
+   Adapted from smart-home-interface reference app. */
 
-/* ─── Design tokens ────────────────────────────────────────────────────────── */
+/* ─── Design tokens (dark — default) ──────────────────────────────────────── */
 
 :root {
-    /* Backgrounds — dark scale */
+    /* Backgrounds */
     --bg-base: #141418;
     --bg-surface: #1c1c24;
     --bg-elevated: #24242e;
@@ -22,7 +22,7 @@
     --text-tertiary: #606070;
     --text-inverse: #141418;
 
-    /* Accent (cyan — inherited from original, works well on dark) */
+    /* Accent (cyan) */
     --accent: #4fc3f7;
     --accent-hover: #81d4fa;
     --accent-muted: #4fc3f722;
@@ -35,12 +35,12 @@
     --status-warning-border: #b8860b;
     --status-warning-text: #ffd54f;
 
-    /* Shadows — slightly stronger for dark UI */
+    /* Shadows */
     --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.24);
     --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.32);
     --shadow-lg: 0 4px 16px rgba(0, 0, 0, 0.40);
 
-    /* Spacing scale (matches reference) */
+    /* Spacing scale */
     --space-xs: 0.25rem;
     --space-sm: 0.5rem;
     --space-md: 1rem;
@@ -58,6 +58,45 @@
 
     /* Touch */
     --min-touch: 44px;
+
+    /* Colour scheme hint for native controls */
+    color-scheme: dark;
+}
+
+/* ─── Design tokens (light) ───────────────────────────────────────────────── */
+
+[data-theme="light"] {
+    --bg-base: #f2f2f6;
+    --bg-surface: #ffffff;
+    --bg-elevated: #eaeaf0;
+    --bg-inset: #e4e4ec;
+    --bg-hover: #dddde6;
+
+    --border-default: #d0d0da;
+    --border-subtle: #e0e0e8;
+    --border-accent: #0d8ecf44;
+
+    --text-primary: #1a1a2e;
+    --text-secondary: #55556a;
+    --text-tertiary: #8888a0;
+    --text-inverse: #ffffff;
+
+    --accent: #0d8ecf;
+    --accent-hover: #0a7ab8;
+    --accent-muted: #0d8ecf1a;
+
+    --status-on: #2e7d32;
+    --status-on-glow: #4caf5044;
+    --status-warning: #e67e22;
+    --status-warning-bg: #fff3e0;
+    --status-warning-border: #ffb74d;
+    --status-warning-text: #bf360c;
+
+    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.06);
+    --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.10);
+    --shadow-lg: 0 4px 16px rgba(0, 0, 0, 0.14);
+
+    color-scheme: light;
 }
 
 /* ─── Reset & base ─────────────────────────────────────────────────────────── */
@@ -145,6 +184,62 @@ button {
     white-space: nowrap;
 }
 
+/* ─── Theme toggle ─────────────────────────────────────────────────────────── */
+
+.theme-toggle {
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    padding: 4px 10px;
+    font-size: 1rem;
+    line-height: 1;
+    min-height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: border-color 0.2s, background-color 0.2s;
+}
+
+.theme-toggle:hover {
+    border-color: var(--accent);
+    background: var(--bg-hover);
+}
+
+.theme-toggle:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
+/* ─── New-session header button ────────────────────────────────────────────── */
+
+.new-session-btn {
+    background: var(--accent);
+    color: var(--text-inverse);
+    border: none;
+    border-radius: var(--radius-sm);
+    padding: 6px 14px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    min-height: 32px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    transition: background-color 0.2s, transform 0.1s;
+}
+
+.new-session-btn:hover {
+    background: var(--accent-hover);
+}
+
+.new-session-btn:active {
+    transform: scale(0.97);
+}
+
+.new-session-btn:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
 /* ─── Main content area ─────────────────────────────────────────────────────── */
 
 .main-content {
@@ -202,7 +297,7 @@ button {
     box-shadow: var(--shadow-md), 0 0 0 1px var(--accent-muted);
 }
 
-/* Thumbnail region — top of card, clipped by card's border-radius */
+/* Thumbnail region */
 .session-thumbnail-wrap {
     background: var(--bg-inset);
     min-height: 100px;
@@ -220,7 +315,7 @@ button {
     object-fit: cover;
 }
 
-/* Card body — text content beneath thumbnail */
+/* Card body */
 .session-card-body {
     padding: var(--space-md);
     display: flex;
@@ -466,6 +561,266 @@ button {
     width: 100%;
     height: 100%;
     display: block;
+}
+
+/* ─── Modal ─────────────────────────────────────────────────────────────────── */
+
+.modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.55);
+    z-index: 200;
+}
+
+[data-theme="light"] .modal-backdrop {
+    background: rgba(0, 0, 0, 0.30);
+}
+
+.modal-content {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 201;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-lg);
+    width: 90%;
+    max-width: 520px;
+    max-height: 90vh;
+    overflow-y: auto;
+    padding: var(--space-lg);
+}
+
+.modal-title {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: var(--space-lg);
+}
+
+/* ─── Form controls ─────────────────────────────────────────────────────────── */
+
+.form-group {
+    margin-bottom: var(--space-md);
+}
+
+.form-group label {
+    display: block;
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: var(--text-secondary);
+    margin-bottom: var(--space-xs);
+}
+
+.form-input {
+    width: 100%;
+    background: var(--bg-base);
+    color: var(--text-primary);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    padding: 8px 12px;
+    font-size: 0.85rem;
+    font-family: inherit;
+    outline: none;
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.form-input::placeholder {
+    color: var(--text-tertiary);
+}
+
+.form-input:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-muted);
+}
+
+.form-input.invalid {
+    border-color: #e53935;
+    box-shadow: 0 0 0 2px rgba(229, 57, 53, 0.15);
+}
+
+.form-error {
+    font-size: 0.75rem;
+    color: #e53935;
+    margin-top: var(--space-xs);
+}
+
+.form-hint {
+    font-size: 0.72rem;
+    color: var(--text-tertiary);
+    margin-top: var(--space-xs);
+}
+
+/* ─── Autocomplete dropdown ─────────────────────────────────────────────────── */
+
+.autocomplete-wrap {
+    position: relative;
+}
+
+.autocomplete-dropdown {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    z-index: 210;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-default);
+    border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+    box-shadow: var(--shadow-md);
+    max-height: 200px;
+    overflow-y: auto;
+    margin-top: -1px;
+}
+
+.autocomplete-item {
+    padding: 6px 12px;
+    font-size: 0.8rem;
+    font-family: var(--font-mono);
+    color: var(--text-primary);
+    cursor: pointer;
+    transition: background-color 0.1s;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.autocomplete-item:hover,
+.autocomplete-item.active {
+    background: var(--bg-hover);
+}
+
+/* ─── Layout type toggle ────────────────────────────────────────────────────── */
+
+.layout-type-toggle {
+    display: flex;
+    gap: 0;
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+}
+
+.layout-type-btn {
+    flex: 1;
+    background: var(--bg-base);
+    color: var(--text-secondary);
+    border: none;
+    border-right: 1px solid var(--border-default);
+    padding: 6px 12px;
+    font-size: 0.8rem;
+    font-weight: 500;
+    transition: background-color 0.2s, color 0.2s;
+}
+
+.layout-type-btn:last-child {
+    border-right: none;
+}
+
+.layout-type-btn:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+}
+
+.layout-type-btn.active {
+    background: var(--accent);
+    color: var(--text-inverse);
+}
+
+/* ─── Layout preview ────────────────────────────────────────────────────────── */
+
+.layout-preview {
+    margin-top: var(--space-sm);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    padding: var(--space-sm);
+    background: var(--bg-inset);
+    min-height: 80px;
+}
+
+.layout-preview-row {
+    display: flex;
+    gap: 3px;
+}
+
+.layout-preview-row + .layout-preview-row {
+    margin-top: 3px;
+}
+
+.layout-preview-col {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    flex: 1;
+}
+
+.layout-preview-pane {
+    flex: 1;
+    min-height: 28px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-default);
+    border-radius: 4px;
+}
+
+/* ─── Form actions ──────────────────────────────────────────────────────────── */
+
+.form-actions {
+    display: flex;
+    gap: var(--space-sm);
+    justify-content: flex-end;
+    margin-top: var(--space-lg);
+}
+
+.btn-primary {
+    background: var(--accent);
+    color: var(--text-inverse);
+    border: none;
+    border-radius: var(--radius-sm);
+    padding: 8px 20px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    min-height: var(--min-touch);
+    transition: background-color 0.2s, transform 0.1s;
+}
+
+.btn-primary:hover {
+    background: var(--accent-hover);
+}
+
+.btn-primary:active {
+    transform: scale(0.98);
+}
+
+.btn-primary:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.btn-primary:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
+.btn-secondary {
+    background: transparent;
+    color: var(--text-secondary);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    padding: 8px 20px;
+    font-size: 0.85rem;
+    font-weight: 500;
+    min-height: var(--min-touch);
+    transition: border-color 0.2s, color 0.2s;
+}
+
+.btn-secondary:hover {
+    border-color: var(--accent);
+    color: var(--text-primary);
+}
+
+.btn-secondary:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
 }
 
 /* ─── Utility ───────────────────────────────────────────────────────────────── */
