@@ -277,7 +277,7 @@ async def _proxy_http(request: web.Request, target: str) -> web.Response:
             body = await resp.read()
             # Relay content headers only; drop hop-by-hop from response too.
             headers: dict[str, str] = {}
-            for h in ("Content-Type", "Cache-Control", "ETag", "Last-Modified"):
+            for h in ("Content-Type", "Content-Encoding", "Cache-Control", "ETag", "Last-Modified"):
                 if h in resp.headers:
                     headers[h] = resp.headers[h]
             return web.Response(status=resp.status, body=body, headers=headers)
@@ -396,8 +396,10 @@ async def on_startup(app: web.Application) -> None:
     app["session_manager"] = mgr
     app["start_time"] = time.monotonic()
 
-    # Shared HTTP client for the reverse proxy.
-    app["client_session"] = aiohttp.ClientSession()
+    # Shared HTTP client for the reverse proxy.  Disable auto-decompression
+    # so compressed responses (e.g. ttyd's 711 KB gzipped HTML) are forwarded
+    # to the browser as-is instead of being inflated and re-sent uncompressed.
+    app["client_session"] = aiohttp.ClientSession(auto_decompress=False)
 
     # Kill orphaned ttyd processes from a previous server run so their
     # ports are freed before we start spawning new ones.
