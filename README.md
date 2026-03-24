@@ -7,7 +7,7 @@ A lightweight web dashboard that discovers your tmux sessions and exposes each o
 ## Features
 
 - **Automatic session discovery** — polls tmux every 5 s (active) / 30 s (idle), no manual registration
-- **Multi-pane terminal** — each session opens in a full ttyd terminal inside the browser; up to 19 concurrent sessions
+- **Single terminal view** — clicking a session opens one full ttyd terminal showing the real tmux layout (panes, splits, status bar); up to 19 concurrent sessions
 - **Auto-refresh** — dashboard reflects session create/destroy in real time without a page reload
 - **Dark theme** — clean, low-distraction UI
 - **Always-on via launchd** — survives reboots; crashes restart automatically
@@ -77,22 +77,23 @@ Edit `config.py` and restart the service for changes to take effect.
 
 ```
 Browser
-  │  HTTP GET /          → dashboard (index.html + app.js)
-  │  HTTP GET /api/sessions → JSON list of live sessions
-  │  WebSocket :768x      → ttyd terminal stream (one port per session)
-  ▼
+  |  HTTP GET /                     -> dashboard (index.html + app.js)
+  |  HTTP GET /api/sessions          -> JSON list of live sessions
+  |  HTTP GET /api/sessions/{name}   -> session metadata + ttyd_url
+  |  WebSocket :768x                 -> ttyd terminal stream (one port per session)
+  v
 server.py  (aiohttp, port 7680)
-  │
-  ├── session_manager.py
-  │     ├── polls `tmux list-sessions` every N seconds
-  │     ├── spawns ttyd subprocess per session  (ports 7681–7699)
-  │     └── kills ttyd when session disappears
-  │
-  └── static/
+  |
+  +-- session_manager.py
+  |     +-- polls `tmux list-sessions` every N seconds
+  |     +-- spawns ttyd subprocess per session  (ports 7681-7699)
+  |     +-- kills ttyd when session disappears
+  |
+  +-- static/
         index.html, app.js, style.css
 ```
 
-Each tmux session gets its own `ttyd` process on a port drawn from the pool. The browser connects directly to that port via WebSocket for the terminal stream.
+Each tmux session gets its own `ttyd` process on a port drawn from the pool. The session detail view embeds a single iframe pointing at that ttyd port; tmux renders its own pane layout inside the terminal, so no per-pane iframe splitting is needed.
 
 ## launchd Management
 
