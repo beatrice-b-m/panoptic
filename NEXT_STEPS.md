@@ -240,51 +240,97 @@ This is a longer-term goal that builds on the other work being stable first.
 
 ### Feasibility Assessment
 
-**Effort: Very High | Risk: High | Dependencies: Stable core features (1-4, 8)**
+**Revised effort rating: depends entirely on approach chosen (see below)**
 
-This is the most complex and risky item on the roadmap by a significant margin.
+My initial evaluation of this item was too pessimistic in some areas and missed a viable alternative that doesn't require Tauri at all. The key insight is architectural: since tmux-dash already reverse-proxies ttyd through `/terminal/{name}/`, the parent page and the ttyd iframe are **same-origin**. This means the dashboard's JavaScript can reach into the iframe and call `window.term.input()` on ttyd's exposed xterm.js instance to inject keystrokes programmatically. This changes the design space significantly.
 
-**Architecture challenge:**
+#### The actual problem
 
-The current system has the browser connecting directly to the tmux-dash server over Tailscale. The frontend is vanilla HTML/CSS/JS with no build step. A Tauri wrapper fundamentally changes this:
+The core issue is not "we need a native app." The core issue is: **mobile soft keyboards do not provide Esc, Tab, Ctrl, Alt, arrow keys, or function keys**, and xterm.js has no built-in solution. The xterm.js project has had an open issue for mobile support since 2017 (xtermjs/xterm.js#1101) and as of 2025/2026, still characterizes mobile touch support as "limited" with "no mobile-optimized interface elements" (xtermjs/xterm.js#5377). Additional mobile problems include predictive text interference (xtermjs/xterm.js#2403) and iOS Smart Keyboard arrow keys not registering due to how iOS dispatches keydown events.
 
-- **Tauri requires a Rust toolchain and build system.** The project currently has zero build steps. Adding Tauri introduces `cargo`, a `tauri.conf.json`, and platform-specific build targets. For mobile, you also need Xcode (iOS) and Android Studio + NDK (Android).
-- **The frontend would need bundling.** Tauri loads frontend assets from a local webview. The current vanilla JS SPA can be loaded as-is for desktop, but mobile Tauri apps require the frontend to be bundled into the app binary. This pushes toward adding a bundler (Vite is the standard Tauri companion).
-- **The terminal iframe pattern breaks on mobile.** The current architecture embeds ttyd's built-in xterm.js UI via `<iframe>` pointed at the ttyd port. On mobile, the Tauri app's webview would need to reach those ttyd ports, which means the device needs Tailscale connectivity to the Mac Mini's ttyd ports — the same as the browser. Tauri doesn't solve the terminal rendering problem; xterm.js inside a mobile webview has the same input limitations as xterm.js in a mobile browser.
+What's needed is an **extra-keys bar** — the pattern used by Termux, Blink Shell, and every serious mobile terminal app. A row of buttons (Esc, Tab, Ctrl, Alt, ←, →, ↑, ↓, etc.) that inject the corresponding escape sequences into the terminal.
 
-**The core problem Tauri doesn't solve:**
+There are three approaches to providing this, with dramatically different effort levels:
 
-The motivation states that mobile terminal input is broken because web-based xterm.js lacks arrow keys and modifier keys on mobile. However: Tauri's mobile webview is still a webview. xterm.js running inside a Tauri webview on iOS has the same soft keyboard limitations as xterm.js in Safari. What actually solves this is a **custom native input layer** — a Swift/Kotlin component that captures touch input and synthesizes key events. Tauri 2.0 supports native mobile plugins (Swift on iOS, Kotlin on Android) that can do this, but writing a custom terminal keyboard is a substantial native development project in its own right.
+#### Approach A: Web-only extra-keys toolbar (no Tauri)
 
-**What a Tauri wrapper actually provides:**
+**Effort: Low-Medium (1-3 days) | Risk: Low | Dependencies: None**
 
-- **Desktop:** An installable app with its own window. Marginal benefit over a browser tab for a personal tool. One minor win: the app could auto-discover the server's Tailscale address without the user bookmarking it.
-- **iOS/Android:** An installable app that opens the dashboard. Without a native keyboard layer, the terminal experience is identical to the mobile browser. With a native keyboard layer, the terminal becomes usable — but that keyboard is the actual deliverable, and it's a significant native project.
+Add an HTML toolbar to the session view (above or below the terminal iframe) with touch-friendly buttons for terminal-critical keys. On button press, reach into the iframe and call `iframe.contentWindow.term.input(escapeSequence)` to inject the keystroke.
 
-**If you proceed anyway:**
+The escape sequences are well-known ANSI codes:
+- Arrow keys: `\x1b[A` (up), `\x1b[B` (down), `\x1b[C` (right), `\x1b[D` (left)
+- Esc: `\x1b`
+- Tab: `\t`
+- Ctrl+C: `\x03`
+- Ctrl+D: `\x04`
+- Ctrl+Z: `\x1a`
 
-1. **Initialize Tauri project.** `cargo install create-tauri-app`, scaffold in a `tauri/` subdirectory. Configure it to load the dashboard from the remote server URL (not bundled assets), since the data source is always the Mac Mini.
-2. **Desktop build.** Works out of the box — point the webview at `https://mac-mini.ts.net:7680`. Minimal code, mostly configuration.
-3. **Mobile builds.** Requires Xcode + iOS simulator (or device), Android Studio + emulator. Tauri 2.0 supports this but the toolchain setup is non-trivial.
-4. **Native keyboard plugin.** Write a Tauri plugin with Swift (iOS) and Kotlin (Android) implementations that render a terminal-appropriate soft keyboard with arrow keys, Ctrl, Alt, Tab, Esc, function keys. Wire the key events into the webview's xterm.js instance via `window.postMessage` or Tauri's IPC.
-5. **App distribution.** iOS requires an Apple Developer account ($99/year) and either TestFlight or Ad Hoc distribution. Android can side-load APKs.
+Implementation:
+1. Add a `<div class="extra-keys-bar">` with buttons to the session view HTML.
+2. CSS: fixed-position bar, flexbox row of `min-height: 44px` touch targets, styled consistently with the existing theme. Show only on touch devices (media query or user toggle).
+3. JS: on button tap, grab the terminal iframe reference and call `iframe.contentWindow.term.input(sequence)`. For modifier keys (Ctrl, Alt), implement sticky-toggle behavior — tap Ctrl, it highlights, the next key press sends Ctrl+{key}.
+4. ~100-150 lines of JS, ~60-80 lines of CSS. No backend changes. No build tools.
 
-**Implementation sequence (if pursued):**
-1. Scaffold Tauri 2.0 project alongside existing code.
-2. Desktop wrapper pointing at remote server URL. (~1-2 days)
-3. Mobile builds with basic webview loading. (~2-3 days for toolchain + config)
-4. Native terminal keyboard plugin for iOS. (~2-4 weeks of native iOS development)
-5. Native terminal keyboard plugin for Android. (~2-4 weeks of native Android development)
-6. App signing and distribution pipeline.
+**Limitation:** The toolbar sits in the web page, not attached to the OS soft keyboard. On mobile you see: `[header] [extra-keys bar] [terminal iframe] [soft keyboard]`. Some vertical space is consumed. The bar doesn't appear/disappear in sync with the soft keyboard — it's always visible (or toggled manually). This is a cosmetic compromise, not a functional one.
 
-**Risks:**
-- The native keyboard plugin is the critical-path item and the hardest to estimate. It's native mobile development, not web development — a different skill set entirely.
-- Tauri mobile is stable but less mature than Tauri desktop. Edge cases in webview behavior, especially around keyboard management and iframe focus, may require platform-specific workarounds.
-- Maintaining a native app adds ongoing cost: OS updates, webview API changes, app store review (if distributing via stores).
-- The benefit-to-cost ratio is questionable for a single-user personal tool. A simpler alternative: use a third-party terminal app on mobile (Blink Shell, Termius) that SSH's into the Mac Mini, then attach to tmux sessions directly. This bypasses the entire web UI and gives native terminal input immediately.
+**This approach solves the stated problem (missing terminal keys on mobile) with minimal effort and zero platform dependencies.** It works on any mobile browser, any tablet, any OS. No app stores, no Rust toolchain, no Xcode.
 
-**Recommendation:** Defer indefinitely unless mobile terminal access is genuinely blocking your workflow. The desktop wrapper is low-effort but low-value. The mobile keyboard — the only piece that solves the stated problem — is a multi-week native development project. Consider the SSH-from-mobile-app alternative first: install Blink Shell or Termius on your iPad/phone, SSH via Tailscale, `tmux attach`. This gives you native terminal input with zero development effort.
+#### Approach B: Tauri with native keyboard accessory (iOS inputAccessoryView / Android toolbar)
 
+**Effort: Medium (5-10 days total, both platforms) | Risk: Medium | Dependencies: Tauri toolchain, Xcode, Android Studio**
+
+Wrap the dashboard in a Tauri app and use native platform APIs to attach the extra-keys row directly to the soft keyboard. On iOS this is `inputAccessoryView` (a UIView attached above the keyboard); on Android it's a custom view in the keyboard area.
+
+My initial estimate of "2-4 weeks per platform" was wrong. An `inputAccessoryView` with terminal key buttons is a standard iOS pattern — roughly 100-200 lines of Swift. It is not a custom IME or custom keyboard extension (those genuinely are multi-week projects). The distinction:
+
+- **inputAccessoryView** (what we need): A UIView attached to the text input's keyboard. When the keyboard appears, your view appears above it. When it dismisses, your view goes with it. This is what Termux, Blink Shell, and iSH use. Standard UIKit, extensively documented, no special entitlements or capabilities required. Effort: ~2-3 days for iOS including Tauri plugin bridge.
+- **Custom keyboard extension** (what we do NOT need): A full replacement keyboard distributed as a system extension. Requires a separate app extension target, entitlements, App Store review. Weeks of work. Not applicable here.
+- **Custom IME** (also not needed): An input method editor that replaces the system text input pipeline. Even more complex. Irrelevant.
+
+Similarly, on Android, a custom view above the keyboard (not a full InputMethodService) is ~150-250 lines of Kotlin plus the Tauri plugin bridge (~200 lines of Rust + JS glue). Effort: ~3-4 days.
+
+Total realistic effort: **5-10 days for both platforms**, not 4-8 weeks as I initially stated.
+
+However, Tauri introduces significant overhead beyond the keyboard plugin itself:
+- Rust toolchain setup and maintenance.
+- Tauri project scaffolding (`tauri.conf.json`, build config).
+- Xcode project for iOS builds; Android Studio + NDK for Android builds.
+- App signing: iOS requires an Apple Developer account ($99/year) and either TestFlight or Ad Hoc provisioning. Android can side-load APKs.
+- The frontend can load from the remote server URL (no bundling needed), but Tauri's mobile webview may have quirks with same-origin iframe access that need debugging.
+- Ongoing maintenance: OS updates, webview API changes, Tauri version updates.
+
+**Advantage over Approach A:** The extra-keys bar moves with the soft keyboard, feels native, doesn't consume viewport space when the keyboard is hidden. This is a genuine UX improvement, but it's a polish improvement on top of Approach A's functional solution.
+
+#### Approach C: Replace ttyd with a custom xterm.js terminal frontend
+
+**Effort: High (1-3 weeks) | Risk: Medium-High | Dependencies: None**
+
+Instead of embedding ttyd via iframe and trying to inject keys across the boundary, replace ttyd entirely. Build a custom terminal page that includes xterm.js, the WebSocket connection to tmux (via a Python WebSocket-to-pty bridge), and the extra-keys bar — all in one page, no iframes.
+
+This eliminates the iframe indirection and gives full control over the terminal UI, but means:
+- Writing a WebSocket-to-pty bridge in Python (or using an existing library like `aiohttp` websockets + `pty` module).
+- Managing xterm.js directly (addons, fit, WebGL renderer, etc.) instead of letting ttyd handle it.
+- Losing ttyd's built-in features: file transfer (zmodem), reconnection, flow control.
+- A real build step for the frontend (xterm.js is an npm package, needs bundling).
+
+This is the cleanest long-term architecture but the highest upfront cost. Not recommended unless the iframe approach (A or B) hits fundamental limitations.
+
+#### Summary comparison
+
+| Approach | Effort | Extra-keys UX | Requires native tooling | Ongoing cost |
+| --- | --- | --- | --- | --- |
+| A: Web toolbar | 1-3 days | Functional, static bar | No | Near zero |
+| B: Tauri + native accessory | 5-10 days | Polished, keyboard-attached | Yes (Rust, Xcode, Android Studio) | Moderate |
+| C: Replace ttyd | 1-3 weeks | Full control | No (but adds npm/bundler) | Moderate |
+
+#### Other considerations
+
+- **Desktop Tauri wrapper:** Minimal value. An installable desktop app that opens the dashboard provides almost nothing over a browser bookmark for a single-user tool. The only marginal win is auto-discovery of the server's Tailscale address. Not worth the toolchain overhead on its own.
+- **SSH-from-mobile alternative:** For ad-hoc mobile access, using Blink Shell or Termius on iOS (both support Tailscale) to SSH directly into the Mac Mini and `tmux attach` gives native terminal input with zero development effort. This doesn't provide the dashboard's session gallery or monitoring UI, but if the goal is just "interact with a session from my phone," it's immediate.
+- **Predictive text interference:** Even with an extra-keys bar, iOS/Android predictive text misbehaves in xterm.js (text appears ahead of cursor, backspace deletes unpredictably). This is an xterm.js bug that neither Tauri nor a web toolbar fixes. Workarounds exist (`<input type="password">` on the hidden textarea, or `inputmode="none"` to suppress the soft keyboard entirely when using only the extra-keys bar) but they need testing.
+
+**Recommendation:** Start with Approach A (web-only extra-keys toolbar). It's 1-3 days of work in the existing vanilla JS codebase with no new dependencies, and it solves the core problem. If the static-bar UX proves insufficient on daily use, Approach B (Tauri native accessory) is a targeted upgrade at 5-10 days — but only pursue it after Approach A has been used and its limitations are concretely felt, not hypothetically anticipated.
 ---
 
 ## 6. Remote Host Support (SSH)
@@ -583,7 +629,7 @@ Expose configuration editing through the dashboard UI itself, reading from and w
    ┌────────▼──────────┐
    │  4. Custom Toolbar │  Effort: Medium
    │  Commands          │  Depends on 3
-   └──────────────────┘
+   └───────────────────┘
 
    ┌──────────────────────┐
    │  1. Extension         │  Effort: High
@@ -591,20 +637,21 @@ Expose configuration editing through the dashboard UI itself, reading from and w
    └──────────────────────┘
 
    ┌──────────────────────┐
-   │  5. Tauri / Mobile    │  Effort: Very High
-   │  App                  │  Depends on stable core (1-4, 8)
+   │  5. Mobile Input      │  Effort: Low (web-only) to Medium (Tauri)
+   │  (extra-keys bar)     │  No hard dependencies for web approach
    └──────────────────────┘
 ```
 
 **Suggested priority ordering (highest value per effort first):**
 
-1. **8a** — Env var coverage. Trivial effort, immediate operational value.
-2. **8b** — Settings file. Low effort, unblocks multiple future items.
-3. **3** — External API. Medium effort, high value for OMP integration use case.
-4. **2** — Session profiles. Medium effort, high usability value, can start without 8b using file-per-profile approach.
-5. **7** — Security. Medium effort, should be done before or alongside item 3 (send-keys is RCE).
-6. **4** — Toolbar commands. Medium effort, depends on 3.
-7. **1** — Extension architecture. High effort, deferred until concrete extension needs are clear.
-8. **6** — Remote host support. Very high effort, major architectural change.
-9. **8c** — UI configuration. High effort, deferred until schema is stable.
-10. **5** — Tauri/mobile. Very high effort, questionable ROI. Consider SSH-from-mobile alternative.
+1. **8a** -- Env var coverage. Trivial effort, immediate operational value.
+2. **8b** -- Settings file. Low effort, unblocks multiple future items.
+3. **3** -- External API. Medium effort, high value for OMP integration use case.
+4. **2** -- Session profiles. Medium effort, high usability value, can start without 8b using file-per-profile approach.
+5. **5 (Approach A)** -- Web-only extra-keys toolbar. 1-3 days, solves mobile input with no new dependencies. Moves up significantly from original assessment.
+6. **7** -- Security. Medium effort, should be done before or alongside item 3 (send-keys is RCE).
+7. **4** -- Toolbar commands. Medium effort, depends on 3.
+8. **1** -- Extension architecture. High effort, deferred until concrete extension needs are clear.
+9. **6** -- Remote host support. Very high effort, major architectural change.
+10. **8c** -- UI configuration. High effort, deferred until schema is stable.
+11. **5 (Approach B)** -- Tauri native keyboard accessory. Only if Approach A proves insufficient after real use.
