@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>tmux-dash</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <!-- Warning banner (hidden by default) -->
+    <div id="warning-banner" class="warning-banner hidden"></div>
+
+    <!-- Dashboard view (session list) -->
+    <div id="dashboard-view">
+        <header class="header">
+            <h1 class="header-title">tmux<span>-dash</span></h1>
+            <span id="session-count" class="session-count-badge">0 sessions</span>
+            <div class="header-spacer"></div>
+            <span id="last-refreshed" class="last-refreshed">—</span>
+        </header>
+
+        <main class="main-content">
+            <div id="session-grid" class="session-grid"></div>
+            <div id="empty-state" class="empty-state hidden">
+                <div class="empty-state-icon">ℹ️</div>
+                <div class="empty-state-message">No active tmux sessions found.</div>
+                <div class="empty-state-sub">Sessions will appear here when tmux is running.</div>
+            </div>
+            <div id="pagination" class="pagination"></div>
+        </main>
+    </div>
+
+    <!-- Session view (terminal panes) -->
+    <div id="session-view" class="session-view hidden">
+        <div class="session-view-header">
+            <button id="back-btn" class="back-btn">← Back</button>
+            <h2 id="session-title" class="session-view-name"></h2>
+        </div>
+        <div id="pane-grid" class="pane-grid"></div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
