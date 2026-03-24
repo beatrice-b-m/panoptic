@@ -225,7 +225,6 @@ class SessionManager:
             "--port", str(port),
             "--interface", TTYD_BIND_HOST,
             "--writable",
-            "--title-format", f"tmux: {session_name}",
             self._tmux_path, "attach-session", "-t", session_name,
         ]
 
