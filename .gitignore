@@ -1,1 +1,6 @@
 .env
+
+# Runtime
+logs/
+__pycache__/
+*.pyc
