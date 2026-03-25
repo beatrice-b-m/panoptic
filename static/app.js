@@ -22,6 +22,11 @@ let _successTimer = null;
 // Cached host list from last fetch.
 let _hosts = [];
 
+// Template state
+let _templates = [];            // cached template list from API
+let _selectedTemplate = null;   // currently selected template object (with variables[])
+let _paneCommands = [];         // per-pane command strings indexed by pane order
+
 // ---------------------------------------------------------------------------
 // Theme
 // ---------------------------------------------------------------------------
@@ -612,12 +617,22 @@ function openNewSessionModal() {
     setActiveLayoutType('none');
     hideCompletions();
     clearLayoutPreview();
+    _paneCommands = [];
+    _selectedTemplate = null;
+    document.getElementById('template-select').value = '';
+    document.getElementById('rename-template-btn').disabled = true;
+    document.getElementById('delete-template-btn').disabled = true;
+    hideMacroVariables();
+    // Fetch templates when modal opens.
+    fetchTemplates();
     document.getElementById('session-name-input').focus();
 }
 
 function closeNewSessionModal() {
     document.getElementById('new-session-modal').classList.add('hidden');
     hideCompletions();
+    _selectedTemplate = null;
+    _paneCommands = [];
 }
 
 function setActiveLayoutType(type) {
@@ -769,46 +784,92 @@ function highlightCompletion(items) {
 // ---------------------------------------------------------------------------
 
 function parseLayoutSpec(spec) {
-    if (!spec) return null;
-    const parts = spec.split(':');
+    if (!spec || !spec.trim()) return null;
+    const segments = spec.split(':');
     const counts = [];
-    for (const p of parts) {
-        const n = parseInt(p, 10);
-        if (isNaN(n) || n < 1) return null;
-        counts.push(n);
+    const commands = [];
+
+    for (const seg of segments) {
+        const s = seg.trim();
+        if (!s) return null;
+
+        // Try pure integer first.
+        const n = parseInt(s, 10);
+        if (!isNaN(n) && String(n) === s && n >= 1) {
+            counts.push(n);
+            for (let i = 0; i < n; i++) commands.push('');
+            continue;
+        }
+
+        // Command segment: comma-separated.
+        const cmds = s.split(',').map(c => c.trim());
+        if (cmds.length === 0 || cmds.some(c => c === '')) return null;
+        counts.push(cmds.length);
+        commands.push(...cmds);
     }
-    return counts.length > 0 ? counts : null;
+
+    return counts.length > 0 ? { counts, commands } : null;
 }
 
 function updateLayoutPreview() {
     const type = getActiveLayoutType();
     const spec = document.getElementById('layout-spec-input').value.trim();
     const previewEl = document.getElementById('layout-preview');
+    const cmdSection = document.getElementById('pane-commands-section');
 
     if (type === 'none' || !spec) {
         previewEl.classList.add('hidden');
         previewEl.innerHTML = '';
+        cmdSection.classList.add('hidden');
+        _paneCommands = [];
         return;
     }
 
-    const counts = parseLayoutSpec(spec);
-    if (!counts) {
+    const parsed = parseLayoutSpec(spec);
+    if (!parsed) {
         previewEl.classList.add('hidden');
         previewEl.innerHTML = '';
+        cmdSection.classList.add('hidden');
+        _paneCommands = [];
         return;
+    }
+
+    const { counts, commands } = parsed;
+    const totalPanes = counts.reduce((a, b) => a + b, 0);
+
+    // Ensure _paneCommands array covers all panes.
+    while (_paneCommands.length < totalPanes) _paneCommands.push('');
+    _paneCommands.length = totalPanes;
+
+    // Pre-fill from spec commands where no overlay exists.
+    for (let i = 0; i < totalPanes; i++) {
+        if (!_paneCommands[i] && commands[i]) {
+            _paneCommands[i] = commands[i];
+        }
     }
 
     previewEl.classList.remove('hidden');
     previewEl.innerHTML = '';
+    let paneIdx = 0;
+
+    function makePaneEl(idx) {
+        const pane = document.createElement('div');
+        pane.className = 'layout-preview-pane clickable';
+        pane.dataset.paneIndex = idx;
+        const label = document.createElement('span');
+        label.className = 'pane-index';
+        label.textContent = _paneCommands[idx] ? '\u2713' : String(idx);
+        pane.appendChild(label);
+        pane.addEventListener('click', () => focusPaneCommand(idx));
+        return pane;
+    }
 
     if (type === 'row') {
         for (const paneCount of counts) {
             const row = document.createElement('div');
             row.className = 'layout-preview-row';
             for (let p = 0; p < paneCount; p++) {
-                const pane = document.createElement('div');
-                pane.className = 'layout-preview-pane';
-                row.appendChild(pane);
+                row.appendChild(makePaneEl(paneIdx++));
             }
             previewEl.appendChild(row);
         }
@@ -819,21 +880,415 @@ function updateLayoutPreview() {
             const col = document.createElement('div');
             col.className = 'layout-preview-col';
             for (let p = 0; p < paneCount; p++) {
-                const pane = document.createElement('div');
-                pane.className = 'layout-preview-pane';
-                col.appendChild(pane);
+                col.appendChild(makePaneEl(paneIdx++));
             }
             row.appendChild(col);
         }
         previewEl.appendChild(row);
     }
+
+    // Render pane command editor.
+    renderPaneCommandEditor(totalPanes);
 }
 
 function clearLayoutPreview() {
     const previewEl = document.getElementById('layout-preview');
     previewEl.classList.add('hidden');
     previewEl.innerHTML = '';
+    document.getElementById('pane-commands-section').classList.add('hidden');
+    _paneCommands = [];
 }
+
+function renderPaneCommandEditor(totalPanes) {
+    const section = document.getElementById('pane-commands-section');
+    const container = document.getElementById('pane-commands-container');
+    container.innerHTML = '';
+
+    if (totalPanes <= 1) {
+        // For single-pane, show a simple input.
+        section.classList.remove('hidden');
+        const row = document.createElement('div');
+        row.className = 'pane-command-row';
+        const label = document.createElement('span');
+        label.className = 'pane-command-label';
+        label.textContent = 'Pane 0';
+        const input = document.createElement('input');
+        input.className = 'pane-command-input';
+        input.type = 'text';
+        input.placeholder = 'startup command (optional)';
+        input.value = _paneCommands[0] || '';
+        input.addEventListener('input', () => {
+            _paneCommands[0] = input.value;
+            updateLayoutPreview();
+        });
+        row.appendChild(label);
+        row.appendChild(input);
+        container.appendChild(row);
+        return;
+    }
+
+    section.classList.remove('hidden');
+    for (let i = 0; i < totalPanes; i++) {
+        const row = document.createElement('div');
+        row.className = 'pane-command-row';
+        const label = document.createElement('span');
+        label.className = 'pane-command-label';
+        label.textContent = `Pane ${i}`;
+        const input = document.createElement('input');
+        input.className = 'pane-command-input';
+        input.type = 'text';
+        input.placeholder = 'startup command (optional)';
+        input.value = _paneCommands[i] || '';
+        input.dataset.paneIndex = i;
+        input.addEventListener('input', () => {
+            _paneCommands[i] = input.value;
+            // Update preview pane indicators.
+            const paneEl = document.querySelector(`.layout-preview-pane[data-pane-index="${i}"] .pane-index`);
+            if (paneEl) paneEl.textContent = input.value ? '\u2713' : String(i);
+        });
+        row.appendChild(label);
+        row.appendChild(input);
+        container.appendChild(row);
+    }
+}
+
+function focusPaneCommand(idx) {
+    const section = document.getElementById('pane-commands-section');
+    if (section.classList.contains('hidden')) return;
+    const input = section.querySelector(`.pane-command-input[data-pane-index="${idx}"]`);
+    if (input) {
+        input.focus();
+        input.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Template management
+// ---------------------------------------------------------------------------
+
+async function fetchTemplates() {
+    try {
+        const resp = await fetch('/api/templates');
+        if (!resp.ok) return;
+        const data = await resp.json();
+        _templates = data.templates || [];
+        renderTemplateSelect();
+    } catch (e) {
+        // Silently fail.
+    }
+}
+
+function renderTemplateSelect() {
+    const sel = document.getElementById('template-select');
+    const current = sel.value;
+    // Clear all except the first "None" option.
+    while (sel.options.length > 1) sel.remove(1);
+    for (const t of _templates) {
+        const opt = document.createElement('option');
+        opt.value = t.template_name;
+        opt.textContent = t.template_name;
+        sel.appendChild(opt);
+    }
+    // Restore selection if it still exists.
+    if (current && _templates.some(t => t.template_name === current)) {
+        sel.value = current;
+    }
+}
+
+function onTemplateSelect() {
+    const sel = document.getElementById('template-select');
+    const name = sel.value;
+    const renameBtn = document.getElementById('rename-template-btn');
+    const deleteBtn = document.getElementById('delete-template-btn');
+
+    if (!name) {
+        _selectedTemplate = null;
+        renameBtn.disabled = true;
+        deleteBtn.disabled = true;
+        hideMacroVariables();
+        return;
+    }
+
+    _selectedTemplate = _templates.find(t => t.template_name === name) || null;
+    renameBtn.disabled = !_selectedTemplate;
+    deleteBtn.disabled = !_selectedTemplate;
+
+    if (_selectedTemplate) {
+        loadTemplateIntoForm(_selectedTemplate);
+    }
+}
+
+function loadTemplateIntoForm(tpl) {
+    document.getElementById('session-name-input').value = tpl.name || '';
+    document.getElementById('session-cwd-input').value = tpl.directory || '';
+
+    const layoutType = tpl.layout_type || 'none';
+    setActiveLayoutType(layoutType);
+
+    document.getElementById('layout-spec-input').value = tpl.layout_spec || '';
+
+    // Pre-fill pane commands from template.
+    _paneCommands = [...(tpl.pane_commands || [])];
+    updateLayoutPreview();
+
+    // Render macro variables if the template has any.
+    const vars = tpl.variables || [];
+    if (vars.length > 0) {
+        showMacroVariables(vars);
+    } else {
+        hideMacroVariables();
+    }
+}
+
+function showMacroVariables(vars) {
+    const section = document.getElementById('macro-variables-section');
+    const container = document.getElementById('macro-variables-container');
+    container.innerHTML = '';
+
+    for (const v of vars) {
+        const field = document.createElement('div');
+        field.className = 'macro-var-field';
+
+        const label = document.createElement('span');
+        label.className = 'macro-var-name';
+        label.textContent = `{${v}}`;
+
+        const input = document.createElement('input');
+        input.className = 'macro-var-input';
+        input.type = 'text';
+        input.placeholder = `Value for ${v}`;
+        input.dataset.varName = v;
+        input.required = true;
+
+        field.appendChild(label);
+        field.appendChild(input);
+        container.appendChild(field);
+    }
+
+    section.classList.remove('hidden');
+}
+
+function hideMacroVariables() {
+    const section = document.getElementById('macro-variables-section');
+    section.classList.add('hidden');
+    document.getElementById('macro-variables-container').innerHTML = '';
+}
+
+function collectMacroVariables() {
+    const inputs = document.querySelectorAll('#macro-variables-container .macro-var-input');
+    const vars = {};
+    let valid = true;
+    for (const input of inputs) {
+        const name = input.dataset.varName;
+        const value = input.value.trim();
+        if (!value) {
+            input.classList.add('invalid');
+            valid = false;
+        } else {
+            input.classList.remove('invalid');
+        }
+        vars[name] = value;
+    }
+    return valid ? vars : null;
+}
+
+// --- Save template ---
+
+function openSaveTemplateModal() {
+    document.getElementById('save-template-modal').classList.remove('hidden');
+    const input = document.getElementById('save-template-name-input');
+    input.value = '';
+    document.getElementById('save-template-error').classList.add('hidden');
+    input.focus();
+}
+
+function closeSaveTemplateModal() {
+    document.getElementById('save-template-modal').classList.add('hidden');
+}
+
+async function confirmSaveTemplate() {
+    const input = document.getElementById('save-template-name-input');
+    const errorEl = document.getElementById('save-template-error');
+    const templateName = input.value.trim();
+
+    if (!templateName) {
+        errorEl.textContent = 'Template name is required.';
+        errorEl.classList.remove('hidden');
+        return;
+    }
+
+    if (!/^[A-Za-z0-9_-]+$/.test(templateName)) {
+        errorEl.textContent = 'Only letters, digits, hyphens, and underscores allowed.';
+        errorEl.classList.remove('hidden');
+        return;
+    }
+
+    const body = {
+        template_name: templateName,
+        name: document.getElementById('session-name-input').value.trim(),
+        directory: document.getElementById('session-cwd-input').value.trim(),
+        layout_type: getActiveLayoutType(),
+        layout_spec: document.getElementById('layout-spec-input').value.trim(),
+        pane_commands: _paneCommands.slice(),
+    };
+
+    try {
+        const resp = await fetch('/api/templates', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const data = await resp.json();
+
+        if (!resp.ok) {
+            errorEl.textContent = data.error || `HTTP ${resp.status}`;
+            errorEl.classList.remove('hidden');
+            return;
+        }
+
+        closeSaveTemplateModal();
+        showSuccessBanner(`Template "${templateName}" saved.`);
+        await fetchTemplates();
+        document.getElementById('template-select').value = templateName;
+        onTemplateSelect();
+    } catch (err) {
+        errorEl.textContent = `Failed: ${err.message}`;
+        errorEl.classList.remove('hidden');
+    }
+}
+
+// --- Rename template ---
+
+function openRenameTemplateModal() {
+    if (!_selectedTemplate) return;
+    document.getElementById('rename-template-modal').classList.remove('hidden');
+    const input = document.getElementById('rename-template-name-input');
+    input.value = _selectedTemplate.template_name;
+    document.getElementById('rename-template-error').classList.add('hidden');
+    input.focus();
+    input.select();
+}
+
+function closeRenameTemplateModal() {
+    document.getElementById('rename-template-modal').classList.add('hidden');
+}
+
+async function confirmRenameTemplate() {
+    if (!_selectedTemplate) return;
+    const input = document.getElementById('rename-template-name-input');
+    const errorEl = document.getElementById('rename-template-error');
+    const newName = input.value.trim();
+
+    if (!newName) {
+        errorEl.textContent = 'Name is required.';
+        errorEl.classList.remove('hidden');
+        return;
+    }
+
+    if (!/^[A-Za-z0-9_-]+$/.test(newName)) {
+        errorEl.textContent = 'Only letters, digits, hyphens, and underscores allowed.';
+        errorEl.classList.remove('hidden');
+        return;
+    }
+
+    const oldName = _selectedTemplate.template_name;
+    try {
+        const resp = await fetch(`/api/templates/${encodeURIComponent(oldName)}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ new_name: newName }),
+        });
+        const data = await resp.json();
+
+        if (!resp.ok) {
+            errorEl.textContent = data.error || `HTTP ${resp.status}`;
+            errorEl.classList.remove('hidden');
+            return;
+        }
+
+        closeRenameTemplateModal();
+        showSuccessBanner(`Template renamed to "${newName}".`);
+        await fetchTemplates();
+        document.getElementById('template-select').value = newName;
+        onTemplateSelect();
+    } catch (err) {
+        errorEl.textContent = `Failed: ${err.message}`;
+        errorEl.classList.remove('hidden');
+    }
+}
+
+// --- Delete template ---
+
+function openDeleteTemplateModal() {
+    if (!_selectedTemplate) return;
+    const name = _selectedTemplate.template_name;
+    document.getElementById('delete-template-confirm-text').textContent =
+        `Are you sure you want to delete template "${name}"? This cannot be undone.`;
+    document.getElementById('delete-template-modal').classList.remove('hidden');
+}
+
+function closeDeleteTemplateModal() {
+    document.getElementById('delete-template-modal').classList.add('hidden');
+}
+
+async function confirmDeleteTemplate() {
+    if (!_selectedTemplate) return;
+    const name = _selectedTemplate.template_name;
+
+    try {
+        const resp = await fetch(`/api/templates/${encodeURIComponent(name)}`, {
+            method: 'DELETE',
+        });
+
+        if (!resp.ok) {
+            const data = await resp.json();
+            showBanner(data.error || `Failed to delete template (HTTP ${resp.status})`);
+            closeDeleteTemplateModal();
+            return;
+        }
+
+        closeDeleteTemplateModal();
+        showSuccessBanner(`Template "${name}" deleted.`);
+        _selectedTemplate = null;
+        document.getElementById('template-select').value = '';
+        onTemplateSelect();
+        await fetchTemplates();
+    } catch (err) {
+        closeDeleteTemplateModal();
+        showBanner(`Failed to delete template: ${err.message}`);
+    }
+}
+
+// --- Direct-create macro guard ---
+
+function containsPlaceholders(text) {
+    return text.includes('{') || text.includes('}');
+}
+
+function validateDirectCreateFields() {
+    // In non-template mode, reject any field containing braces.
+    if (_selectedTemplate) return true;  // template mode — no guard
+
+    const fields = [
+        { name: 'Session Name', value: document.getElementById('session-name-input').value },
+        { name: 'Working Directory', value: document.getElementById('session-cwd-input').value },
+        { name: 'Layout Spec', value: document.getElementById('layout-spec-input').value },
+    ];
+    for (const cmd of _paneCommands) {
+        fields.push({ name: 'Pane Command', value: cmd });
+    }
+
+    for (const f of fields) {
+        if (containsPlaceholders(f.value)) {
+            const errorEl = document.getElementById('session-name-error');
+            errorEl.textContent = `Macro placeholders ({...}) are only allowed in templates. Found in "${f.name}". Save as a template first.`;
+            errorEl.classList.remove('hidden');
+            return false;
+        }
+    }
+    return true;
+}
+
 
 // ---------------------------------------------------------------------------
 // Create session submission
@@ -848,6 +1303,55 @@ async function submitNewSession(e) {
     const createBtn = document.getElementById('create-session-btn');
     const errorEl = document.getElementById('session-name-error');
 
+    // --- Template-based launch ---
+    if (_selectedTemplate) {
+        const vars = collectMacroVariables();
+        if (vars === null) {
+            errorEl.textContent = 'All template variables must be filled.';
+            errorEl.classList.remove('hidden');
+            return;
+        }
+
+        createBtn.disabled = true;
+        createBtn.textContent = 'Creating\u2026';
+        const hostId = encodeURIComponent(currentHostId);
+
+        const body = {
+            template_name: _selectedTemplate.template_name,
+            variables: vars,
+        };
+        // Include pane command overlay if any are set.
+        if (_paneCommands.some(c => c)) {
+            body.pane_commands = _paneCommands.slice();
+        }
+
+        try {
+            const resp = await fetch(`/api/hosts/${hostId}/sessions/from-template`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            const data = await resp.json();
+
+            if (!resp.ok) {
+                errorEl.textContent = data.error || `HTTP ${resp.status}`;
+                errorEl.classList.remove('hidden');
+                return;
+            }
+
+            closeNewSessionModal();
+            hideBanner();
+            openSession(data.name);
+        } catch (err) {
+            showBanner(`Failed to create session: ${err.message}`);
+        } finally {
+            createBtn.disabled = false;
+            createBtn.textContent = 'Create';
+        }
+        return;
+    }
+
+    // --- Direct create ---
     const name = nameInput.value.trim();
     if (!validateSessionName(name)) {
         if (!name) {
@@ -858,12 +1362,15 @@ async function submitNewSession(e) {
         return;
     }
 
+    // Macro guard: no braces in direct create.
+    if (!validateDirectCreateFields()) return;
+
     const layoutType = getActiveLayoutType();
     const layoutSpec = specInput.value.trim();
 
     if (layoutType !== 'none' && layoutSpec) {
         if (!parseLayoutSpec(layoutSpec)) {
-            showBanner('Invalid layout spec: must be colon-separated positive integers (e.g. 2:1:3).');
+            showBanner('Invalid layout spec: use colon-separated integers or command segments (e.g. 2:1 or vim,jest:3).');
             return;
         }
     }
@@ -874,6 +1381,10 @@ async function submitNewSession(e) {
     if (layoutType !== 'none' && layoutSpec) {
         body.layout_type = layoutType;
         body.layout_spec = layoutSpec;
+    }
+    // Include pane commands if any are set.
+    if (_paneCommands.some(c => c)) {
+        body.pane_commands = _paneCommands.slice();
     }
 
     createBtn.disabled = true;
@@ -898,7 +1409,6 @@ async function submitNewSession(e) {
 
         closeNewSessionModal();
         hideBanner();
-
         openSession(data.name);
     } catch (err) {
         showBanner(`Failed to create session: ${err.message}`);
@@ -1026,6 +1536,27 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('modal-backdrop').addEventListener('click', closeNewSessionModal);
     document.getElementById('new-session-form').addEventListener('submit', submitNewSession);
 
+    // Template controls
+    document.getElementById('template-select').addEventListener('change', onTemplateSelect);
+    document.getElementById('save-template-btn').addEventListener('click', openSaveTemplateModal);
+    document.getElementById('rename-template-btn').addEventListener('click', openRenameTemplateModal);
+    document.getElementById('delete-template-btn').addEventListener('click', openDeleteTemplateModal);
+
+    // Save template modal
+    document.getElementById('confirm-save-template').addEventListener('click', confirmSaveTemplate);
+    document.getElementById('cancel-save-template').addEventListener('click', closeSaveTemplateModal);
+    document.getElementById('save-template-backdrop').addEventListener('click', closeSaveTemplateModal);
+
+    // Rename template modal
+    document.getElementById('confirm-rename-template').addEventListener('click', confirmRenameTemplate);
+    document.getElementById('cancel-rename-template').addEventListener('click', closeRenameTemplateModal);
+    document.getElementById('rename-template-backdrop').addEventListener('click', closeRenameTemplateModal);
+
+    // Delete template modal
+    document.getElementById('confirm-delete-template').addEventListener('click', confirmDeleteTemplate);
+    document.getElementById('cancel-delete-template').addEventListener('click', closeDeleteTemplateModal);
+    document.getElementById('delete-template-backdrop').addEventListener('click', closeDeleteTemplateModal);
+
     // Session name validation on input
     document.getElementById('session-name-input').addEventListener('input', (e) => {
         validateSessionName(e.target.value.trim());
@@ -1086,6 +1617,23 @@ document.addEventListener('DOMContentLoaded', () => {
     document.addEventListener('keydown', (e) => {
         if (e.key === 'Escape') {
             closeAllMenus();
+
+            // Template modals (check first since they stack on top of new-session modal)
+            const saveTemplateModal = document.getElementById('save-template-modal');
+            if (!saveTemplateModal.classList.contains('hidden')) {
+                closeSaveTemplateModal();
+                return;
+            }
+            const renameTemplateModal = document.getElementById('rename-template-modal');
+            if (!renameTemplateModal.classList.contains('hidden')) {
+                closeRenameTemplateModal();
+                return;
+            }
+            const deleteTemplateModal = document.getElementById('delete-template-modal');
+            if (!deleteTemplateModal.classList.contains('hidden')) {
+                closeDeleteTemplateModal();
+                return;
+            }
 
             const deleteModal = document.getElementById('delete-session-modal');
             if (!deleteModal.classList.contains('hidden')) {

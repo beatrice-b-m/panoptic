@@ -1164,3 +1164,193 @@ button {
     border-color: #81c784;
     color: #2e7d32;
 }
+
+
+/* ─── Template section (in new-session modal) ────────────────────────────────────────── */
+
+.template-section {
+    margin-bottom: var(--space-md);
+    padding-bottom: var(--space-md);
+    border-bottom: 1px solid var(--border-subtle);
+}
+
+.template-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: var(--space-xs);
+}
+
+.template-label {
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: var(--text-secondary);
+}
+
+.template-actions {
+    display: flex;
+    gap: 4px;
+}
+
+.template-action-btn {
+    background: var(--bg-elevated);
+    color: var(--text-secondary);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    padding: 2px 10px;
+    font-size: 0.72rem;
+    font-weight: 500;
+    transition: border-color 0.2s, color 0.2s, background-color 0.2s;
+}
+
+.template-action-btn:hover:not(:disabled) {
+    border-color: var(--accent);
+    color: var(--text-primary);
+}
+
+.template-action-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.template-action-btn-danger:hover:not(:disabled) {
+    border-color: #e53935;
+    color: #e53935;
+}
+
+.template-select {
+    font-family: var(--font-mono);
+    font-size: 0.82rem;
+}
+
+/* ─── Macro variable inputs ─────────────────────────────────────────────────────── */
+
+.macro-variables-label {
+    display: block;
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: var(--text-secondary);
+    margin-bottom: var(--space-xs);
+}
+
+.macro-variables-container {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-sm);
+}
+
+.macro-var-field {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+}
+
+.macro-var-name {
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    color: var(--accent);
+    min-width: 100px;
+    flex-shrink: 0;
+}
+
+.macro-var-input {
+    flex: 1;
+    background: var(--bg-base);
+    color: var(--text-primary);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    padding: 6px 10px;
+    font-size: 0.82rem;
+    font-family: var(--font-mono);
+    outline: none;
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.macro-var-input:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-muted);
+}
+
+.macro-var-input.invalid {
+    border-color: #e53935;
+    box-shadow: 0 0 0 2px rgba(229, 57, 53, 0.15);
+}
+
+/* ─── Pane command editor ───────────────────────────────────────────────────────── */
+
+.pane-commands-container {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-xs);
+    margin-top: var(--space-xs);
+}
+
+.pane-command-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+}
+
+.pane-command-label {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    color: var(--text-tertiary);
+    min-width: 60px;
+    flex-shrink: 0;
+}
+
+.pane-command-input {
+    flex: 1;
+    background: var(--bg-base);
+    color: var(--text-primary);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    padding: 5px 8px;
+    font-size: 0.78rem;
+    font-family: var(--font-mono);
+    outline: none;
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.pane-command-input:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-muted);
+}
+
+/* Pane preview: clickable panes for command assignment */
+.layout-preview-pane.clickable {
+    cursor: pointer;
+    transition: background-color 0.15s, border-color 0.15s;
+}
+
+.layout-preview-pane.clickable:hover {
+    background: var(--bg-hover);
+    border-color: var(--accent);
+}
+
+.layout-preview-pane.selected {
+    border-color: var(--accent);
+    background: var(--accent-muted);
+    box-shadow: 0 0 0 1px var(--accent);
+}
+
+.layout-preview-pane .pane-index {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    color: var(--text-tertiary);
+    user-select: none;
+}
+
+/* ─── Wider modal variant for new-session ───────────────────────────────────── */
+
+.modal-content-wide {
+    max-width: 600px;
+}
+
+.modal-content-narrow {
+    max-width: 400px;
+}

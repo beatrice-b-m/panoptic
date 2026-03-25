@@ -64,8 +64,30 @@
     <!-- New session modal -->
     <div id="new-session-modal" class="hidden">
         <div class="modal-backdrop" id="modal-backdrop"></div>
-        <div class="modal-content">
+        <div class="modal-content modal-content-wide">
             <h2 class="modal-title">New Session</h2>
+
+            <!-- Template section -->
+            <div class="template-section">
+                <div class="template-header">
+                    <label class="template-label">Template</label>
+                    <div class="template-actions">
+                        <button type="button" id="save-template-btn" class="template-action-btn" title="Save current form as template">Save</button>
+                        <button type="button" id="rename-template-btn" class="template-action-btn" title="Rename selected template" disabled>Rename</button>
+                        <button type="button" id="delete-template-btn" class="template-action-btn template-action-btn-danger" title="Delete selected template" disabled>Delete</button>
+                    </div>
+                </div>
+                <select id="template-select" class="form-input template-select">
+                    <option value="">-- None (direct create) --</option>
+                </select>
+            </div>
+
+            <!-- Macro variables (shown when template has variables) -->
+            <div id="macro-variables-section" class="form-group hidden">
+                <label class="macro-variables-label">Template Variables</label>
+                <div id="macro-variables-container" class="macro-variables-container"></div>
+            </div>
+
             <form id="new-session-form" autocomplete="off">
                 <div class="form-group">
                     <label for="session-name-input">Session Name</label>
@@ -93,10 +115,18 @@
                 <div id="layout-spec-group" class="form-group hidden">
                     <label for="layout-spec-input">Layout Spec</label>
                     <input id="layout-spec-input" class="form-input" type="text"
-                           placeholder="2:1:3">
-                    <div class="form-hint">Colon-separated pane counts per row/column (e.g. 2:1 = two panes, then one).</div>
+                           placeholder="2:1:3 or vim,ls:3">
+                    <div class="form-hint">Colon-separated pane counts or command segments (e.g. 2:1 or vim,jest:3).</div>
                     <div id="layout-preview" class="layout-preview hidden"></div>
                 </div>
+
+                <!-- Pane command editor (shown when a pane is selected in preview) -->
+                <div id="pane-commands-section" class="form-group hidden">
+                    <label>Pane Commands</label>
+                    <div class="form-hint">Click a pane in the preview above to assign a startup command.</div>
+                    <div id="pane-commands-container" class="pane-commands-container"></div>
+                </div>
+
                 <div class="form-actions">
                     <button type="button" id="cancel-new-session" class="btn-secondary">Cancel</button>
                     <button type="submit" id="create-session-btn" class="btn-primary">Create</button>
@@ -152,6 +182,56 @@
                     <button type="submit" id="add-host-btn" class="btn-primary">Add Host</button>
                 </div>
             </form>
+        </div>
+    </div>
+
+    <!-- Save template name prompt -->
+    <div id="save-template-modal" class="hidden">
+        <div class="modal-backdrop" id="save-template-backdrop"></div>
+        <div class="modal-content modal-content-narrow">
+            <h2 class="modal-title">Save Template</h2>
+            <div class="form-group">
+                <label for="save-template-name-input">Template Name</label>
+                <input id="save-template-name-input" class="form-input" type="text"
+                       placeholder="my-template" required>
+                <div class="form-hint">Letters, digits, hyphens, and underscores only.</div>
+                <div id="save-template-error" class="form-error hidden"></div>
+            </div>
+            <div class="form-actions">
+                <button type="button" id="cancel-save-template" class="btn-secondary">Cancel</button>
+                <button type="button" id="confirm-save-template" class="btn-primary">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Rename template prompt -->
+    <div id="rename-template-modal" class="hidden">
+        <div class="modal-backdrop" id="rename-template-backdrop"></div>
+        <div class="modal-content modal-content-narrow">
+            <h2 class="modal-title">Rename Template</h2>
+            <div class="form-group">
+                <label for="rename-template-name-input">New Name</label>
+                <input id="rename-template-name-input" class="form-input" type="text"
+                       placeholder="new-name" required>
+                <div id="rename-template-error" class="form-error hidden"></div>
+            </div>
+            <div class="form-actions">
+                <button type="button" id="cancel-rename-template" class="btn-secondary">Cancel</button>
+                <button type="button" id="confirm-rename-template" class="btn-primary">Rename</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Delete template confirmation -->
+    <div id="delete-template-modal" class="hidden">
+        <div class="modal-backdrop" id="delete-template-backdrop"></div>
+        <div class="modal-content delete-modal-content">
+            <h2 class="modal-title">Delete Template</h2>
+            <p id="delete-template-confirm-text" class="delete-confirm-text"></p>
+            <div class="form-actions">
+                <button type="button" id="cancel-delete-template" class="btn-secondary">Cancel</button>
+                <button type="button" id="confirm-delete-template" class="btn-danger">Delete</button>
+            </div>
         </div>
     </div>
 
