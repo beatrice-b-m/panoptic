@@ -10,6 +10,7 @@ Session routes are scoped under ``/api/hosts/{host_id}/sessions/...`` and
 the terminal proxy lives at ``/terminal/{host_id}/{session_name}/...``.
 """
 
+import os
 import asyncio
 import logging
 import ssl
@@ -92,6 +93,7 @@ async def handle_hosts(request: web.Request) -> web.Response:
             **h,
             "status": st.get("status", "unknown"),
             "status_message": st.get("message", ""),
+            "default_cwd": os.path.expanduser("~") + "/" if h["type"] == "local" else "~/",
         })
 
     return web.json_response({"hosts": result})

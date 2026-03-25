@@ -91,13 +91,15 @@
             <form id="new-session-form" autocomplete="off">
                 <div class="form-group">
                     <label for="session-name-input">Session Name</label>
-                    <input id="session-name-input" class="form-input" type="text"
-                           placeholder="my-session" required>
+                    <div class="macro-preview-wrap">
+                        <input id="session-name-input" class="form-input" type="text"
+                               placeholder="my-session" required>
+                    </div>
                     <div id="session-name-error" class="form-error hidden"></div>
                 </div>
                 <div class="form-group">
                     <label for="session-cwd-input">Working Directory</label>
-                    <div class="autocomplete-wrap">
+                    <div class="autocomplete-wrap macro-preview-wrap">
                         <input id="session-cwd-input" class="form-input" type="text"
                                placeholder="/path/to/project">
                         <div id="cwd-completions" class="autocomplete-dropdown hidden"></div>
@@ -114,8 +116,10 @@
                 </div>
                 <div id="layout-spec-group" class="form-group hidden">
                     <label for="layout-spec-input">Layout Spec</label>
-                    <input id="layout-spec-input" class="form-input" type="text"
-                           placeholder="2:1:3 or vim,ls:3">
+                    <div class="macro-preview-wrap">
+                        <input id="layout-spec-input" class="form-input" type="text"
+                               placeholder="2:1:3 or vim,ls:3">
+                    </div>
                     <div class="form-hint">Colon-separated pane counts or command segments (e.g. 2:1 or vim,jest:3).</div>
                     <div id="layout-preview" class="layout-preview hidden"></div>
                 </div>
@@ -127,8 +131,11 @@
                     <div id="pane-commands-container" class="pane-commands-container"></div>
                 </div>
 
+                <div id="macro-status-row" class="macro-status-row hidden"></div>
                 <div class="form-actions">
                     <button type="button" id="cancel-new-session" class="btn-secondary">Cancel</button>
+                    <div class="form-actions-spacer"></div>
+                    <button type="button" id="save-as-template-btn" class="btn-secondary-accent">Save as Template</button>
                     <button type="submit" id="create-session-btn" class="btn-primary">Create</button>
                 </div>
             </form>

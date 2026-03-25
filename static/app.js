@@ -27,6 +27,13 @@ let _templates = [];            // cached template list from API
 let _selectedTemplate = null;   // currently selected template object (with variables[])
 let _paneCommands = [];         // per-pane command strings indexed by pane order
 
+// Tracks which fields the user has actively edited (removes prefilled styling).
+const _editedFields = new Set();
+
+// Macro placeholder regex — matches backend template_macros.py _PLACEHOLDER_RE.
+const MACRO_PLACEHOLDER_RE = /\{([^}]*)\}/g;
+const MACRO_VAR_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
 // ---------------------------------------------------------------------------
 // Theme
 // ---------------------------------------------------------------------------
@@ -610,7 +617,6 @@ let _cwdActiveIndex = -1;
 function openNewSessionModal() {
     document.getElementById('new-session-modal').classList.remove('hidden');
     document.getElementById('session-name-input').value = '';
-    document.getElementById('session-cwd-input').value = '';
     document.getElementById('layout-spec-input').value = '';
     document.getElementById('session-name-error').classList.add('hidden');
     document.getElementById('session-name-input').classList.remove('invalid');
@@ -619,20 +625,32 @@ function openNewSessionModal() {
     clearLayoutPreview();
     _paneCommands = [];
     _selectedTemplate = null;
+    _editedFields.clear();
     document.getElementById('template-select').value = '';
     document.getElementById('rename-template-btn').disabled = true;
     document.getElementById('delete-template-btn').disabled = true;
     hideMacroVariables();
+
+    // Initialize Working Directory from active host's default_cwd.
+    const activeHost = _hosts.find(h => h.id === currentHostId);
+    const defaultCwd = activeHost?.default_cwd || '';
+    document.getElementById('session-cwd-input').value = defaultCwd;
+
+    // Reset macro status and Create button state.
+    document.getElementById('macro-status-row').classList.add('hidden');
+    document.getElementById('create-session-btn').disabled = false;
+
     // Fetch templates when modal opens.
     fetchTemplates();
+    recomputeFormState();
     document.getElementById('session-name-input').focus();
 }
-
 function closeNewSessionModal() {
     document.getElementById('new-session-modal').classList.add('hidden');
     hideCompletions();
     _selectedTemplate = null;
     _paneCommands = [];
+    _editedFields.clear();
 }
 
 function setActiveLayoutType(type) {
@@ -675,6 +693,279 @@ function validateSessionName(name) {
     errorEl.classList.add('hidden');
     input.classList.remove('invalid');
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// Centralized macro analysis + form state
+// ---------------------------------------------------------------------------
+
+/**
+ * Analyze a text value for macro placeholders.
+ * Returns { placeholders: string[], malformed: boolean, hasBraces: boolean }.
+ */
+function analyzeMacros(text) {
+    if (!text) return { placeholders: [], malformed: false, hasBraces: false };
+    const hasBraces = text.includes('{') || text.includes('}');
+    const placeholders = [];
+    let malformed = false;
+    // Check for unclosed braces.
+    if (/\{(?![^}]*\})/.test(text)) malformed = true;
+    let m;
+    const re = /\{([^}]*)\}/g;
+    while ((m = re.exec(text)) !== null) {
+        const name = m[1];
+        if (!name || !MACRO_VAR_NAME_RE.test(name)) {
+            malformed = true;
+        } else {
+            placeholders.push(name);
+        }
+    }
+    return { placeholders, malformed, hasBraces };
+}
+
+/**
+ * Gather form field values + analyze all for macros.
+ * Returns a comprehensive state object consumed by recomputeFormState.
+ */
+function analyzeFormMacros() {
+    const sessionName = document.getElementById('session-name-input').value;
+    const cwd = document.getElementById('session-cwd-input').value;
+    const layoutSpec = document.getElementById('layout-spec-input').value;
+    const fields = [
+        { id: 'session-name-input', label: 'Session Name', value: sessionName },
+        { id: 'session-cwd-input', label: 'Working Directory', value: cwd },
+        { id: 'layout-spec-input', label: 'Layout Spec', value: layoutSpec },
+    ];
+    for (let i = 0; i < _paneCommands.length; i++) {
+        fields.push({ id: `pane-cmd-${i}`, label: `Pane Command ${i}`, value: _paneCommands[i] || '' });
+    }
+
+    let anyBraces = false;
+    let anyMalformed = false;
+    const allPlaceholders = new Set();
+    const fieldResults = [];
+
+    for (const f of fields) {
+        const a = analyzeMacros(f.value);
+        fieldResults.push({ ...f, ...a });
+        if (a.hasBraces) anyBraces = true;
+        if (a.malformed) anyMalformed = true;
+        for (const p of a.placeholders) allPlaceholders.add(p);
+    }
+
+    // Determine new placeholders not in the selected template's variable set.
+    const templateVars = new Set((_selectedTemplate?.variables || []));
+    const newPlaceholders = [];
+    for (const p of allPlaceholders) {
+        if (!templateVars.has(p)) newPlaceholders.push(p);
+    }
+
+    return {
+        fields: fieldResults,
+        anyBraces,
+        anyMalformed,
+        allPlaceholders: [...allPlaceholders],
+        newPlaceholders,
+        templateVars: [...templateVars],
+        isTemplateMode: !!_selectedTemplate,
+    };
+}
+
+/**
+ * Single entry point for updating all button states, field highlights,
+ * macro status message, and error display. Called on every relevant input.
+ */
+function recomputeFormState() {
+    const analysis = analyzeFormMacros();
+    const createBtn = document.getElementById('create-session-btn');
+    const statusRow = document.getElementById('macro-status-row');
+    const nameError = document.getElementById('session-name-error');
+    const nameInput = document.getElementById('session-name-input');
+
+    // Clear previous macro-related classes from form inputs.
+    for (const f of analysis.fields) {
+        const el = document.getElementById(f.id);
+        if (el) {
+            el.classList.remove('macro-highlight', 'invalid');
+        }
+    }
+
+    // Reset status row.
+    statusRow.classList.add('hidden');
+    statusRow.textContent = '';
+
+    // Reset name error (macro-related; not session-name-format).
+    // We selectively re-show it below if needed.
+
+    let canCreate = true;
+    let statusMessage = '';
+
+    if (analysis.anyMalformed) {
+        canCreate = false;
+        statusMessage = 'Invalid macro placeholder detected. Use {variable_name} format.';
+    }
+
+    if (!analysis.isTemplateMode) {
+        // --- Direct mode ---
+        // Session name format validation (only when no braces).
+        const nameVal = nameInput.value.trim();
+        if (nameVal && !analysis.fields[0].hasBraces && !SESSION_NAME_RE.test(nameVal)) {
+            nameError.textContent = 'Only letters, digits, hyphens, and underscores allowed.';
+            nameError.classList.remove('hidden');
+            nameInput.classList.add('invalid');
+            canCreate = false;
+        } else if (!analysis.anyMalformed) {
+            nameError.classList.add('hidden');
+        }
+
+        if (analysis.anyBraces && !analysis.anyMalformed) {
+            canCreate = false;
+            // Highlight fields that contain braces.
+            for (const f of analysis.fields) {
+                if (f.hasBraces) {
+                    const el = document.getElementById(f.id);
+                    if (el) el.classList.add('macro-highlight');
+                }
+            }
+            statusMessage = 'Macro placeholders ({...}) found. Save as a template to use macros, or remove them to create directly.';
+        }
+    } else {
+        // --- Template mode ---
+        // Allow placeholders that are in the template variable set.
+        // Disable Create if:
+        //   1) malformed placeholders
+        //   2) new placeholders not in template variable set
+        //   3) required macro variable inputs are empty
+        if (analysis.newPlaceholders.length > 0 && !analysis.anyMalformed) {
+            canCreate = false;
+            // Highlight fields with new placeholders.
+            for (const f of analysis.fields) {
+                for (const p of f.placeholders) {
+                    if (analysis.newPlaceholders.includes(p)) {
+                        const el = document.getElementById(f.id);
+                        if (el) el.classList.add('macro-highlight');
+                    }
+                }
+            }
+            statusMessage = `New placeholder(s) {${analysis.newPlaceholders.join('}, {')}} not in template. Save or update the template first.`;
+        }
+
+        // Check if all required macro variable inputs are filled.
+        const varInputs = document.querySelectorAll('#macro-variables-container .macro-var-input');
+        for (const input of varInputs) {
+            if (!input.value.trim()) {
+                canCreate = false;
+                // Don't show status message for empty vars — the field itself shows invalid.
+                break;
+            }
+        }
+
+        // Session name validation for template mode: after rendering,
+        // the result must still be valid. But we skip format errors while placeholders exist.
+    }
+
+    if (statusMessage) {
+        statusRow.textContent = statusMessage;
+        statusRow.classList.remove('hidden');
+    }
+
+    createBtn.disabled = !canCreate;
+
+    // Update token preview overlays for template mode.
+    if (analysis.isTemplateMode) {
+        updateAllTokenPreviews();
+    }
+
+    return analysis;
+}
+
+/**
+ * Collect current macro variable values from the template variable inputs.
+ */
+function getCurrentMacroValues() {
+    const vars = {};
+    const inputs = document.querySelectorAll('#macro-variables-container .macro-var-input');
+    for (const input of inputs) {
+        vars[input.dataset.varName] = input.value;
+    }
+    return vars;
+}
+
+/**
+ * Render a field value with token highlighting as HTML.
+ * Substituted tokens get .macro-token; unresolved get .macro-token-unresolved.
+ */
+function renderTokenPreviewHtml(text, vars) {
+    if (!text) return '';
+    let result = '';
+    let lastIndex = 0;
+    const re = /\{([^}]*)\}/g;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+        // Text before this match.
+        result += escapeHtml(text.slice(lastIndex, m.index));
+        const name = m[1];
+        if (name && MACRO_VAR_NAME_RE.test(name) && vars[name] !== undefined && vars[name] !== '') {
+            result += `<span class="macro-token">${escapeHtml(vars[name])}</span>`;
+        } else if (name && MACRO_VAR_NAME_RE.test(name)) {
+            result += `<span class="macro-token-unresolved">{${escapeHtml(name)}}</span>`;
+        } else {
+            result += escapeHtml(m[0]);
+        }
+        lastIndex = m.index + m[0].length;
+    }
+    result += escapeHtml(text.slice(lastIndex));
+    return result;
+}
+
+/**
+ * Update all token preview overlays for template-mode fields.
+ * Shows rendered preview when field is not focused; hides when focused.
+ */
+function updateAllTokenPreviews() {
+    if (!_selectedTemplate) return;
+    const vars = getCurrentMacroValues();
+    const fieldIds = ['session-name-input', 'session-cwd-input', 'layout-spec-input'];
+    for (const id of fieldIds) {
+        const input = document.getElementById(id);
+        if (!input) continue;
+        const wrap = input.closest('.macro-preview-wrap');
+        if (!wrap) continue;
+        let display = wrap.querySelector('.macro-preview-display');
+        if (!display) {
+            display = document.createElement('div');
+            display.className = 'macro-preview-display';
+            wrap.appendChild(display);
+        }
+        const html = renderTokenPreviewHtml(input.value, vars);
+        display.innerHTML = html;
+        // Only show overlay when the field is not focused and has macro content.
+        const hasMacros = /\{[^}]*\}/.test(input.value);
+        display.style.display = (hasMacros && document.activeElement !== input) ? '' : 'none';
+    }
+}
+
+/**
+ * Wire focus/blur on a field to toggle token preview overlay visibility.
+ */
+function setupPreviewToggle(input) {
+    input.addEventListener('focus', () => {
+        const wrap = input.closest('.macro-preview-wrap');
+        if (wrap) {
+            const display = wrap.querySelector('.macro-preview-display');
+            if (display) display.style.display = 'none';
+        }
+        // Remove prefilled styling on first focus.
+        input.classList.remove('prefilled');
+        _editedFields.add(input.id);
+    });
+    input.addEventListener('blur', () => {
+        // Slight delay to avoid flicker on re-focus.
+        setTimeout(() => {
+            if (document.activeElement === input) return;
+            updateAllTokenPreviews();
+        }, 50);
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -1006,6 +1297,17 @@ function onTemplateSelect() {
         renameBtn.disabled = true;
         deleteBtn.disabled = true;
         hideMacroVariables();
+        // Clear prefilled styling and remove token previews.
+        for (const id of ['session-name-input', 'session-cwd-input', 'layout-spec-input']) {
+            const el = document.getElementById(id);
+            if (el) el.classList.remove('prefilled');
+            const wrap = el?.closest('.macro-preview-wrap');
+            if (wrap) {
+                const display = wrap.querySelector('.macro-preview-display');
+                if (display) display.style.display = 'none';
+            }
+        }
+        recomputeFormState();
         return;
     }
 
@@ -1019,17 +1321,32 @@ function onTemplateSelect() {
 }
 
 function loadTemplateIntoForm(tpl) {
-    document.getElementById('session-name-input').value = tpl.name || '';
-    document.getElementById('session-cwd-input').value = tpl.directory || '';
+    _editedFields.clear();
+
+    const nameInput = document.getElementById('session-name-input');
+    const cwdInput = document.getElementById('session-cwd-input');
+    const specInput = document.getElementById('layout-spec-input');
+
+    nameInput.value = tpl.name || '';
+    cwdInput.value = tpl.directory || '';
 
     const layoutType = tpl.layout_type || 'none';
     setActiveLayoutType(layoutType);
 
-    document.getElementById('layout-spec-input').value = tpl.layout_spec || '';
+    specInput.value = tpl.layout_spec || '';
 
     // Pre-fill pane commands from template.
     _paneCommands = [...(tpl.pane_commands || [])];
     updateLayoutPreview();
+
+    // Apply prefilled styling to template-loaded fields.
+    for (const input of [nameInput, cwdInput, specInput]) {
+        if (input.value) {
+            input.classList.add('prefilled');
+        } else {
+            input.classList.remove('prefilled');
+        }
+    }
 
     // Render macro variables if the template has any.
     const vars = tpl.variables || [];
@@ -1038,8 +1355,9 @@ function loadTemplateIntoForm(tpl) {
     } else {
         hideMacroVariables();
     }
-}
 
+    recomputeFormState();
+}
 function showMacroVariables(vars) {
     const section = document.getElementById('macro-variables-section');
     const container = document.getElementById('macro-variables-container');
@@ -1060,11 +1378,15 @@ function showMacroVariables(vars) {
         input.dataset.varName = v;
         input.required = true;
 
+        // Live: recompute form state and update token previews on input.
+        input.addEventListener('input', () => {
+            recomputeFormState();
+        });
+
         field.appendChild(label);
         field.appendChild(input);
         container.appendChild(field);
     }
-
     section.classList.remove('hidden');
 }
 
@@ -1093,6 +1415,62 @@ function collectMacroVariables() {
 }
 
 // --- Save template ---
+
+// --- Shared template payload builder (used by save/update/save-as) ---
+
+function buildTemplatePayload() {
+    return {
+        name: document.getElementById('session-name-input').value.trim(),
+        directory: document.getElementById('session-cwd-input').value.trim(),
+        layout_type: getActiveLayoutType(),
+        layout_spec: document.getElementById('layout-spec-input').value.trim(),
+        pane_commands: _paneCommands.slice(),
+    };
+}
+
+/**
+ * Top Save button handler:
+ *  - If a template is selected: update it in place (PUT).
+ *  - If no template selected: open save-name modal (new template).
+ */
+function onTopSaveClick() {
+    if (_selectedTemplate) {
+        updateTemplateInPlace();
+    } else {
+        openSaveTemplateModal();
+    }
+}
+
+/**
+ * Update the currently selected template in place via PUT.
+ */
+async function updateTemplateInPlace() {
+    if (!_selectedTemplate) return;
+    const templateName = _selectedTemplate.template_name;
+    const body = buildTemplatePayload();
+
+    try {
+        const resp = await fetch(`/api/templates/${encodeURIComponent(templateName)}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const data = await resp.json();
+
+        if (!resp.ok) {
+            showBanner(data.error || `Failed to update template (HTTP ${resp.status})`);
+            return;
+        }
+
+        showSuccessBanner(`Template "${templateName}" updated.`);
+        await fetchTemplates();
+        // Re-select and reload the updated template.
+        document.getElementById('template-select').value = templateName;
+        onTemplateSelect();
+    } catch (err) {
+        showBanner(`Failed to update template: ${err.message}`);
+    }
+}
 
 function openSaveTemplateModal() {
     document.getElementById('save-template-modal').classList.remove('hidden');
@@ -1125,11 +1503,7 @@ async function confirmSaveTemplate() {
 
     const body = {
         template_name: templateName,
-        name: document.getElementById('session-name-input').value.trim(),
-        directory: document.getElementById('session-cwd-input').value.trim(),
-        layout_type: getActiveLayoutType(),
-        layout_spec: document.getElementById('layout-spec-input').value.trim(),
-        pane_commands: _paneCommands.slice(),
+        ...buildTemplatePayload(),
     };
 
     try {
@@ -1259,37 +1633,6 @@ async function confirmDeleteTemplate() {
     }
 }
 
-// --- Direct-create macro guard ---
-
-function containsPlaceholders(text) {
-    return text.includes('{') || text.includes('}');
-}
-
-function validateDirectCreateFields() {
-    // In non-template mode, reject any field containing braces.
-    if (_selectedTemplate) return true;  // template mode — no guard
-
-    const fields = [
-        { name: 'Session Name', value: document.getElementById('session-name-input').value },
-        { name: 'Working Directory', value: document.getElementById('session-cwd-input').value },
-        { name: 'Layout Spec', value: document.getElementById('layout-spec-input').value },
-    ];
-    for (const cmd of _paneCommands) {
-        fields.push({ name: 'Pane Command', value: cmd });
-    }
-
-    for (const f of fields) {
-        if (containsPlaceholders(f.value)) {
-            const errorEl = document.getElementById('session-name-error');
-            errorEl.textContent = `Macro placeholders ({...}) are only allowed in templates. Found in "${f.name}". Save as a template first.`;
-            errorEl.classList.remove('hidden');
-            return false;
-        }
-    }
-    return true;
-}
-
-
 // ---------------------------------------------------------------------------
 // Create session submission
 // ---------------------------------------------------------------------------
@@ -1302,6 +1645,12 @@ async function submitNewSession(e) {
     const specInput = document.getElementById('layout-spec-input');
     const createBtn = document.getElementById('create-session-btn');
     const errorEl = document.getElementById('session-name-error');
+
+    // Run centralized validation.
+    const analysis = recomputeFormState();
+
+    // If Create is disabled, do not proceed.
+    if (createBtn.disabled) return;
 
     // --- Template-based launch ---
     if (_selectedTemplate) {
@@ -1353,17 +1702,15 @@ async function submitNewSession(e) {
 
     // --- Direct create ---
     const name = nameInput.value.trim();
-    if (!validateSessionName(name)) {
-        if (!name) {
-            errorEl.textContent = 'Session name is required.';
-            errorEl.classList.remove('hidden');
-            nameInput.classList.add('invalid');
-        }
+    if (!name) {
+        errorEl.textContent = 'Session name is required.';
+        errorEl.classList.remove('hidden');
+        nameInput.classList.add('invalid');
         return;
     }
-
-    // Macro guard: no braces in direct create.
-    if (!validateDirectCreateFields()) return;
+    // Session name format is already validated by recomputeFormState.
+    // But double-check the regex to prevent submission of invalid names.
+    if (!SESSION_NAME_RE.test(name)) return;
 
     const layoutType = getActiveLayoutType();
     const layoutSpec = specInput.value.trim();
@@ -1538,7 +1885,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Template controls
     document.getElementById('template-select').addEventListener('change', onTemplateSelect);
-    document.getElementById('save-template-btn').addEventListener('click', openSaveTemplateModal);
+    document.getElementById('save-template-btn').addEventListener('click', onTopSaveClick);
     document.getElementById('rename-template-btn').addEventListener('click', openRenameTemplateModal);
     document.getElementById('delete-template-btn').addEventListener('click', openDeleteTemplateModal);
 
@@ -1557,17 +1904,18 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('cancel-delete-template').addEventListener('click', closeDeleteTemplateModal);
     document.getElementById('delete-template-backdrop').addEventListener('click', closeDeleteTemplateModal);
 
-    // Session name validation on input
-    document.getElementById('session-name-input').addEventListener('input', (e) => {
-        validateSessionName(e.target.value.trim());
+    // Session name validation on input — use centralized recompute.
+    document.getElementById('session-name-input').addEventListener('input', () => {
+        recomputeFormState();
     });
 
-    // Path autocompletion
+    // Path autocompletion + recompute form state on cwd change.
     const cwdInput = document.getElementById('session-cwd-input');
     let cwdDebounce = null;
     cwdInput.addEventListener('input', () => {
         clearTimeout(cwdDebounce);
         cwdDebounce = setTimeout(onCwdInput, 200);
+        recomputeFormState();
     });
     cwdInput.addEventListener('keydown', onCwdKeydown);
     cwdInput.addEventListener('blur', () => {
@@ -1576,11 +1924,25 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Layout type toggle
     document.querySelectorAll('#layout-type-toggle .layout-type-btn').forEach(btn => {
-        btn.addEventListener('click', () => setActiveLayoutType(btn.dataset.layout));
+        btn.addEventListener('click', () => {
+            setActiveLayoutType(btn.dataset.layout);
+            recomputeFormState();
+        });
     });
 
-    // Layout spec preview on input
-    document.getElementById('layout-spec-input').addEventListener('input', updateLayoutPreview);
+    // Layout spec preview on input + recompute.
+    document.getElementById('layout-spec-input').addEventListener('input', () => {
+        updateLayoutPreview();
+        recomputeFormState();
+    });
+
+    // Save as Template button — always opens save-name modal for a new template.
+    document.getElementById('save-as-template-btn').addEventListener('click', openSaveTemplateModal);
+
+    // Setup focus/blur token preview toggles on macro-relevant inputs.
+    setupPreviewToggle(document.getElementById('session-name-input'));
+    setupPreviewToggle(document.getElementById('session-cwd-input'));
+    setupPreviewToggle(document.getElementById('layout-spec-input'));
 
     // Session-view actions dropdown
     document.getElementById('session-actions-btn').addEventListener('click', (e) => {
