@@ -84,6 +84,11 @@ def _build_serve_parser(subparsers: argparse._SubParsersAction) -> None:
         default=defaults.ttyd_binary,
         help=f"Path to ttyd executable (default: {defaults.ttyd_binary})",
     )
+    p.add_argument(
+        "--ttyd-font-family",
+        default=defaults.ttyd_font_family,
+        help=f"Font family for ttyd terminals (default: {defaults.ttyd_font_family!r})",
+    )
 
     # -- tmux / beamux
     p.add_argument(
@@ -177,6 +182,19 @@ def _validate_serve_args(args: argparse.Namespace) -> None:
             )
             sys.exit(1)
 
+    if args.ttyd_port_start < 1 or args.ttyd_port_start > 65535:
+        print(
+            f"error: --ttyd-port-start must be 1-65535, got {args.ttyd_port_start}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if args.ttyd_port_end < 1 or args.ttyd_port_end > 65535:
+        print(
+            f"error: --ttyd-port-end must be 1-65535, got {args.ttyd_port_end}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     if args.ttyd_port_start > args.ttyd_port_end:
         print(
             f"error: --ttyd-port-start ({args.ttyd_port_start}) must be <= "
@@ -213,7 +231,7 @@ def _build_settings(args: argparse.Namespace) -> RuntimeSettings:
         ttyd_binary=args.ttyd_binary,
         tmux_binary=args.tmux_binary,
         beamux_binary=args.beamux_binary,
-        ttyd_font_family=defaults.ttyd_font_family,
+        ttyd_font_family=args.ttyd_font_family,
         poll_interval_active=args.poll_interval_active,
         poll_interval_idle=args.poll_interval_idle,
         session_page_size=args.session_page_size,

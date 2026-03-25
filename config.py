@@ -1,25 +1,22 @@
-import os
-
-
 """Configuration constants for tmux-dash."""
 
+import os
+from dataclasses import dataclass
+
 # Dashboard server binding
-DASHBOARD_HOST = "0.0.0.0"
+DASHBOARD_HOST = "127.0.0.1"
 DASHBOARD_PORT = 7680
 
 # ttyd port pool (supports up to 19 concurrent sessions)
 TTYD_PORT_RANGE_START = 7681
 TTYD_PORT_RANGE_END = 7699
-TTYD_BIND_HOST = "0.0.0.0"
+TTYD_BIND_HOST = "127.0.0.1"
 TTYD_BINARY = "ttyd"
 TMUX_BINARY = "tmux"
 
 # beamux — used for pane-layout creation when shelling out.
-# Defaults to the local bea-sh tools path; override via env var.
-BEAMUX_BINARY = os.getenv(
-    "BEAMUX_BINARY",
-    os.path.expanduser("~/AgentFiles/projects/bea-sh/tools/beamux/beamux"),
-)
+# Install from https://github.com/beatrice-b-m/beamux or override via env var.
+BEAMUX_BINARY = os.getenv("BEAMUX_BINARY", "beamux")
 
 # Terminal font (passed to ttyd via -t fontFamily=...)
 TTYD_FONT_FAMILY = os.getenv("TTYD_FONT_FAMILY", "'Hack Nerd Font', 'Hack Nerd Font Mono', Menlo, Consolas, monospace")
@@ -53,8 +50,6 @@ SSH_CONNECT_TIMEOUT = int(os.getenv("SSH_CONNECT_TIMEOUT", "5"))
 # ---------------------------------------------------------------------------
 # RuntimeSettings — structured runtime configuration for CLI / programmatic use
 # ---------------------------------------------------------------------------
-
-from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
