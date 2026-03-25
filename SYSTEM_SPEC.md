@@ -446,7 +446,7 @@ tmux-dash/
 │   ├── stdout.log
 │   └── stderr.log
 ├── com.user.tmux-dash.plist  # launchd plist template
-├── install.sh             # Setup script (brew deps, launchd registration)
+├── setup-service.sh       # Sets up tmux-dash as a background launchd service
 └── README.md
 ```
 
@@ -495,7 +495,7 @@ TEMPLATES_CONFIG_PATH = "templates.json"  # path to template store
 5. **`static/index.html`** — dashboard shell, session card template
 6. **`static/app.js`** — fetch-based session list, polling, pane layout renderer, iframe management
 7. **`com.user.tmux-dash.plist`** — launchd plist with correct paths
-8. **`install.sh`** — brew install ttyd, pip install deps, launchd load
+8. **`setup-service.sh`** — brew install ttyd, pip install deps, register and start launchd service
 9. **`README.md`** — setup instructions, tailscale access guide
 
 ---

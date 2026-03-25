@@ -49,7 +49,7 @@ tmux-dash/
 ├── logs/                  # stdout.log, stderr.log (launchd-managed)
 ├── com.user.tmux-dash.plist  # launchd plist template (macOS)
 ├── tmux-dash.service          # systemd unit template (Linux)
-├── install.sh             # Setup: brew deps, pip deps, launchd registration
+├── setup-service.sh       # Sets up tmux-dash as a background launchd service
 ├── SYSTEM_SPEC.md         # Authoritative design document
 ├── .env                   # Environment overrides (gitignored)
 └── .env.example           # Template for .env
@@ -66,7 +66,7 @@ tmux-dash/
 | `static/app.js` | Frontend logic: session list, pane renderer, iframe embedding |
 | `com.user.tmux-dash.plist` | macOS launchd service definition |
 | `tmux-dash.service` | Linux systemd user unit definition |
-| `install.sh` | One-shot setup script (macOS) |
+| `setup-service.sh` | Registers tmux-dash as a persistent background service (macOS) |
 
 ## Runtime & Tooling
 
