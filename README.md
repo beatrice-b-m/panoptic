@@ -47,6 +47,8 @@ Then open:
 
 The install script installs dependencies, substitutes paths in the launchd plist, copies it to `~/Library/LaunchAgents/`, and loads the service.
 
+`python3 tmux_dash_cli.py serve` is the canonical entrypoint. `install.sh` configures launchd to use it automatically.
+
 ## Manual Setup
 
 If you prefer not to use `install.sh`:
@@ -59,10 +61,55 @@ brew install ttyd
 pip3 install aiohttp
 
 # 3. Start the server (foreground)
-python3 server.py
+python3 tmux_dash_cli.py serve
 ```
 
 Open `http://localhost:7680`. Press `Ctrl+C` to stop.
+
+## CLI Usage
+
+The CLI provides a `serve` subcommand with full control over runtime settings:
+
+```bash
+# Start with defaults
+python3 tmux_dash_cli.py serve
+
+# Custom port
+python3 tmux_dash_cli.py serve --port 8080
+
+# Custom log level
+python3 tmux_dash_cli.py serve --log-level DEBUG
+
+# See all flags
+python3 tmux_dash_cli.py serve --help
+```
+
+All flags have sensible defaults from `config.py`. Passing no flags is equivalent to the previous `python3 server.py` behavior.
+
+## Headless / Remote Server
+
+Use `--headless` on a remote server where no browser is available. This forces all listeners (dashboard + ttyd) to `127.0.0.1`, preventing external access, and prints SSH port-forwarding instructions:
+
+```bash
+# On the remote server
+python3 tmux_dash_cli.py serve --headless
+python3 tmux_dash_cli.py serve --headless --port 8080
+```
+
+Then from your local machine:
+
+```bash
+ssh -N -L 7680:127.0.0.1:7680 user@remote-host
+```
+
+Browse `http://127.0.0.1:7680` locally. All terminal traffic is reverse-proxied through the dashboard port — no additional port forwards are needed.
+
+`--headless` rejects conflicting flags:
+
+```bash
+# This will fail with a clear error:
+python3 tmux_dash_cli.py serve --headless --host 0.0.0.0
+```
 
 ## Multi-Host Setup
 
@@ -156,7 +203,7 @@ The terminal font defaults to **Hack Font Mono** with a fallback chain of Menlo,
 
 ```bash
 export TTYD_FONT_FAMILY="JetBrains Mono, Fira Code, monospace"
-python3 server.py
+python3 tmux_dash_cli.py serve
 ```
 
 The font must be installed on the **client device** (the browser). The setting is passed to each ttyd instance at spawn time via `-t fontFamily=...`.
@@ -222,7 +269,7 @@ tailscale cert \
 ```bash
 export TLS_CERT=~/.local/share/tmux-dash/cert.pem
 export TLS_KEY=~/.local/share/tmux-dash/key.pem
-python3 server.py
+python3 tmux_dash_cli.py serve
 ```
 
 Or for launchd, add these to the plist's `EnvironmentVariables` dict.
