@@ -8,5 +8,6 @@ __pycache__/
 .omp/
 
 
-# Host config (user-specific)
+# Config data (user-specific)
 hosts.json
+templates.json
