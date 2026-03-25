@@ -14,9 +14,9 @@ A lightweight web dashboard that discovers your tmux sessions and exposes each o
 - **Auto-refresh** -- dashboard reflects session create/destroy in real time without a page reload
 - **Light/dark theme** -- toggle in the header; persists to localStorage; follows `prefers-color-scheme` when no explicit choice is stored
 - **HTTPS via Tailscale** -- optional TLS termination using Tailscale-provisioned certificates; all ttyd traffic is reverse-proxied through a single port
-- **Configurable terminal font** -- terminal font family defaults to Hack Font Mono and is overridable via environment variable
+- **Configurable terminal font** -- terminal font family defaults to Hack Nerd Font and is overridable via environment variable or CLI flag
 - **Always-on via launchd** -- survives reboots; crashes restart automatically
-- **Remote access** -- bind on `0.0.0.0`; reach from any device on your Tailscale network
+- **Remote access** -- use `--host 0.0.0.0` for network access; reach from any device on your Tailscale network
 - **Create sessions from UI** -- click "+New" to spawn a tmux session with optional working directory and pane layout
 - **Pane layout support** -- row or column layouts via colon-separated spec (e.g. `2:1:3`); live CSS grid preview before creation
 - **Directory autocompletion** -- server-side path completion when typing a working directory for new sessions (localhost only)
@@ -47,6 +47,8 @@ Then open:
 
 The install script installs dependencies, substitutes paths in the launchd plist, copies it to `~/Library/LaunchAgents/`, and loads the service.
 
+`python3 tmux_dash_cli.py serve` is the canonical entrypoint. `install.sh` configures launchd to use it automatically.
+
 ## Manual Setup
 
 If you prefer not to use `install.sh`:
@@ -59,10 +61,55 @@ brew install ttyd
 pip3 install aiohttp
 
 # 3. Start the server (foreground)
-python3 server.py
+python3 tmux_dash_cli.py serve
 ```
 
 Open `http://localhost:7680`. Press `Ctrl+C` to stop.
+
+## CLI Usage
+
+The CLI provides a `serve` subcommand with full control over runtime settings:
+
+```bash
+# Start with defaults
+python3 tmux_dash_cli.py serve
+
+# Custom port
+python3 tmux_dash_cli.py serve --port 8080
+
+# Custom log level
+python3 tmux_dash_cli.py serve --log-level DEBUG
+
+# See all flags
+python3 tmux_dash_cli.py serve --help
+```
+
+All flags have sensible defaults from `config.py`. Passing no flags is equivalent to the previous `python3 server.py` behavior.
+
+## Headless / Remote Server
+
+Use `--headless` on a remote server where no browser is available. This forces all listeners (dashboard + ttyd) to `127.0.0.1`, preventing external access, and prints SSH port-forwarding instructions:
+
+```bash
+# On the remote server
+python3 tmux_dash_cli.py serve --headless
+python3 tmux_dash_cli.py serve --headless --port 8080
+```
+
+Then from your local machine:
+
+```bash
+ssh -N -L 7680:127.0.0.1:7680 user@remote-host
+```
+
+Browse `http://127.0.0.1:7680` locally. All terminal traffic is reverse-proxied through the dashboard port — no additional port forwards are needed.
+
+`--headless` rejects conflicting flags:
+
+```bash
+# This will fail with a clear error:
+python3 tmux_dash_cli.py serve --headless --host 0.0.0.0
+```
 
 ## Multi-Host Setup
 
@@ -131,13 +178,13 @@ All tuneable constants live in `config.py`. Most can also be set via environment
 
 | Constant | Default | Env Override | Controls |
 |---|---|---|---|
-| `DASHBOARD_HOST` | `0.0.0.0` | -- | Interface the dashboard binds on |
+| `DASHBOARD_HOST` | `127.0.0.1` | -- | Interface the dashboard binds on (use `--host 0.0.0.0` for network access) |
 | `DASHBOARD_PORT` | `7680` | -- | Dashboard HTTP port |
 | `TTYD_PORT_RANGE_START` | `7681` | -- | First port in the ttyd pool |
 | `TTYD_PORT_RANGE_END` | `7699` | -- | Last port in the ttyd pool (19 slots) |
-| `TTYD_BIND_HOST` | `0.0.0.0` | -- | Interface each ttyd process binds on |
+| `TTYD_BIND_HOST` | `127.0.0.1` | -- | Interface each ttyd process binds on |
 | `TTYD_BINARY` | `ttyd` | -- | Path or name of the ttyd executable |
-| `TTYD_FONT_FAMILY` | `Hack Font Mono, Menlo, ...` | `TTYD_FONT_FAMILY` | Font family passed to ttyd terminals |
+| `TTYD_FONT_FAMILY` | `Hack Nerd Font, ...` | `TTYD_FONT_FAMILY` | Font family passed to ttyd terminals |
 | `POLL_INTERVAL_ACTIVE` | `5` | -- | Seconds between polls when clients are connected |
 | `POLL_INTERVAL_IDLE` | `30` | -- | Seconds between polls when no clients are connected |
 | `SESSION_PAGE_SIZE` | `8` | -- | Sessions shown per page on the dashboard |
@@ -146,17 +193,17 @@ All tuneable constants live in `config.py`. Most can also be set via environment
 | `HOSTS_CONFIG_PATH` | `hosts.json` | `HOSTS_CONFIG_PATH` | Path to JSON host configuration file |
 | `SSH_CONNECT_TIMEOUT` | `5` | `SSH_CONNECT_TIMEOUT` | SSH connect timeout in seconds for remote polling |
 | `LOG_LEVEL` | `INFO` | -- | Python logging level |
-| `BEAMUX_BINARY` | `~/AgentFiles/.../beamux` | `BEAMUX_BINARY` | Path to beamux script for pane layout creation |
+| `BEAMUX_BINARY` | `beamux` | `BEAMUX_BINARY` | Path to [beamux](https://github.com/beatrice-b-m/beamux) for pane layout creation |
 
 Edit `config.py` or set environment variables and restart the service for changes to take effect.
 
 ### Terminal Font
 
-The terminal font defaults to **Hack Font Mono** with a fallback chain of Menlo, Consolas, and generic monospace. Override it via the `TTYD_FONT_FAMILY` environment variable:
+The terminal font defaults to **Hack Nerd Font** with a fallback chain of Hack Nerd Font Mono, Menlo, Consolas, and generic monospace. Override it via the `TTYD_FONT_FAMILY` environment variable or the `--ttyd-font-family` CLI flag:
 
 ```bash
 export TTYD_FONT_FAMILY="JetBrains Mono, Fira Code, monospace"
-python3 server.py
+python3 tmux_dash_cli.py serve
 ```
 
 The font must be installed on the **client device** (the browser). The setting is passed to each ttyd instance at spawn time via `-t fontFamily=...`.
@@ -222,7 +269,7 @@ tailscale cert \
 ```bash
 export TLS_CERT=~/.local/share/tmux-dash/cert.pem
 export TLS_KEY=~/.local/share/tmux-dash/key.pem
-python3 server.py
+python3 tmux_dash_cli.py serve
 ```
 
 Or for launchd, add these to the plist's `EnvironmentVariables` dict.

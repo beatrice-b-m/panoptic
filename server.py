@@ -20,14 +20,7 @@ from urllib.parse import quote as urlquote
 import aiohttp
 from aiohttp import web
 
-from config import (
-    DASHBOARD_HOST,
-    DASHBOARD_PORT,
-    LOG_LEVEL,
-    SESSION_PAGE_SIZE,
-    TLS_CERT,
-    TLS_KEY,
-)
+from config import RuntimeSettings
 from host_config import HostConfig
 from session_manager import SessionManager
 
@@ -61,6 +54,18 @@ async def client_tracking_middleware(request: web.Request, handler):
     finally:
         _active_clients -= 1
 
+
+
+@web.middleware
+async def security_headers_middleware(request: web.Request, handler):
+    response = await handler(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    if request.app.get("_tls_enabled"):
+        response.headers.setdefault(
+            "Strict-Transport-Security", "max-age=63072000; includeSubDomains"
+        )
+    return response
 
 # ---------------------------------------------------------------------------
 # API routes — hosts
@@ -137,8 +142,7 @@ async def handle_remove_host(request: web.Request) -> web.Response:
         )
 
     # Clean up sessions and ttyd processes for the removed host.
-    for name in list(mgr.sessions_for_host(host_id)):
-        await mgr._kill_ttyd(host_id, name)
+    await mgr.remove_host_sessions(host_id)
 
     mgr.reload_hosts()
     return web.json_response({"id": host_id, "deleted": True})
@@ -151,10 +155,11 @@ async def handle_remove_host(request: web.Request) -> web.Response:
 
 async def handle_sessions(request: web.Request) -> web.Response:
     mgr: SessionManager = request.app["session_manager"]
+    settings = request.app["settings"]
     host_id = request.match_info["host_id"]
 
     page = _int_param(request, "page", 1)
-    page_size = _int_param(request, "page_size", SESSION_PAGE_SIZE)
+    page_size = _int_param(request, "page_size", settings.session_page_size)
 
     data = mgr.get_sessions(host_id, page=page, page_size=page_size)
     return web.json_response(data)
@@ -174,10 +179,11 @@ async def handle_panes(request: web.Request) -> web.Response:
 
     panes = await mgr.get_panes(host_id, session_name)
 
-    host = request.host.split(":")[0]
+    safe_host = urlquote(host_id, safe="")
+    safe_name = urlquote(session_name, safe="")
     for pane in panes:
         port = pane.pop("port", None)
-        pane["ttyd_url"] = f"http://{host}:{port}" if port else None
+        pane["ttyd_url"] = f"/terminal/{safe_host}/{safe_name}/" if port else None
 
     return web.json_response({"session": session_name, "panes": panes})
 
@@ -234,11 +240,7 @@ async def handle_health(request: web.Request) -> web.Response:
     mgr: SessionManager = request.app["session_manager"]
     uptime = time.monotonic() - request.app["start_time"]
 
-    # Count total sessions across all hosts.
-    total = sum(
-        len(sessions)
-        for sessions in mgr._host_sessions.values()
-    )
+    total = mgr.total_session_count()
 
     return web.json_response({
         "status": "ok",
@@ -476,26 +478,27 @@ def _int_param(request: web.Request, name: str, default: int) -> int:
         return default
 
 
-def _build_ssl_context() -> ssl.SSLContext | None:
-    """Create an SSL context from TLS_CERT/TLS_KEY, or None for plain HTTP."""
-    if not TLS_CERT or not TLS_KEY:
+def _build_ssl_context(settings: RuntimeSettings) -> ssl.SSLContext | None:
+    """Create an SSL context from settings.tls_cert/tls_key, or None for plain HTTP."""
+    if not settings.tls_cert or not settings.tls_key:
         return None
 
-    cert_path = Path(TLS_CERT)
-    key_path = Path(TLS_KEY)
+    cert_path = Path(settings.tls_cert)
+    key_path = Path(settings.tls_key)
 
     if not cert_path.is_file():
         log.warning(
-            "TLS_CERT=%s does not exist; falling back to plain HTTP", TLS_CERT
+            "TLS_CERT=%s does not exist; falling back to plain HTTP", settings.tls_cert
         )
         return None
     if not key_path.is_file():
         log.warning(
-            "TLS_KEY=%s does not exist; falling back to plain HTTP", TLS_KEY
+            "TLS_KEY=%s does not exist; falling back to plain HTTP", settings.tls_key
         )
         return None
 
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     ctx.load_cert_chain(str(cert_path), str(key_path))
     log.info("TLS enabled — cert=%s key=%s", cert_path, key_path)
     return ctx
@@ -507,10 +510,12 @@ def _build_ssl_context() -> ssl.SSLContext | None:
 
 
 async def on_startup(app: web.Application) -> None:
-    host_config = HostConfig()
+    settings: RuntimeSettings = app["settings"]
+
+    host_config = HostConfig(path=settings.hosts_config_path)
     app["host_config"] = host_config
 
-    mgr = SessionManager(host_config)
+    mgr = SessionManager(host_config, settings)
     app["session_manager"] = mgr
     app["start_time"] = time.monotonic()
 
@@ -518,7 +523,7 @@ async def on_startup(app: web.Application) -> None:
     app["client_session"] = aiohttp.ClientSession(auto_decompress=False)
 
     # Kill orphaned ttyd processes from a previous server run.
-    await mgr._kill_stale_ttyd()
+    await mgr.kill_stale_ttyd()
 
     # Run an initial poll so the API has data before the first client connects.
     await mgr.poll_sessions()
@@ -530,12 +535,12 @@ async def on_startup(app: web.Application) -> None:
     )
 
     scheme = "https" if app.get("_tls_enabled") else "http"
-    total = sum(len(s) for s in mgr._host_sessions.values())
+    total = mgr.total_session_count()
     log.info(
         "tmux-dash started on %s://%s:%d — %d session(s) discovered across %d host(s)",
         scheme,
-        DASHBOARD_HOST,
-        DASHBOARD_PORT,
+        settings.host,
+        settings.port,
         total,
         len(host_config.list_hosts()),
     )
@@ -560,8 +565,12 @@ async def on_cleanup(app: web.Application) -> None:
     log.info("tmux-dash shut down cleanly")
 
 
-def build_app() -> web.Application:
-    app = web.Application(middlewares=[client_tracking_middleware])
+def build_app(settings: RuntimeSettings) -> web.Application:
+    app = web.Application(middlewares=[
+        client_tracking_middleware,
+        security_headers_middleware,
+    ])
+    app["settings"] = settings
 
     # Root
     app.router.add_get("/", handle_index)
@@ -620,24 +629,29 @@ def build_app() -> web.Application:
 # ---------------------------------------------------------------------------
 
 
-def main() -> None:
+def run_server(settings: RuntimeSettings) -> None:
+    """Configure logging, build the app, and run it.  Called by the CLI."""
     logging.basicConfig(
-        level=getattr(logging, LOG_LEVEL, logging.INFO),
+        level=getattr(logging, settings.log_level, logging.INFO),
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    ssl_ctx = _build_ssl_context()
-    app = build_app()
+    ssl_ctx = _build_ssl_context(settings)
+    app = build_app(settings)
     app["_tls_enabled"] = ssl_ctx is not None
 
     web.run_app(
         app,
-        host=DASHBOARD_HOST,
-        port=DASHBOARD_PORT,
+        host=settings.host,
+        port=settings.port,
         ssl_context=ssl_ctx,
         print=None,
     )
+
+
+def main() -> None:
+    run_server(RuntimeSettings.from_defaults())
 
 
 if __name__ == "__main__":

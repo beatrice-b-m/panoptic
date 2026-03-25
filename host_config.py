@@ -20,6 +20,7 @@ from config import HOSTS_CONFIG_PATH
 
 
 HOST_ID_RE = re.compile(r"^[a-z0-9_-]+$")
+_SAFE_SSH_ALIAS_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._@:/-]*$')
 
 _LOCALHOST_ENTRY: dict = {
     "id": "localhost",
@@ -57,6 +58,11 @@ class HostConfig:
             raise ValueError("Label must not be empty")
         if not ssh_alias:
             raise ValueError("SSH alias must not be empty")
+        if not _SAFE_SSH_ALIAS_RE.match(ssh_alias):
+            raise ValueError(
+                f"Invalid SSH alias {ssh_alias!r}: must start with an alphanumeric "
+                "character and contain only [A-Za-z0-9._@:/-]"
+            )
 
         host_id = self._derive_id(label)
 
