@@ -686,25 +686,6 @@ function getActiveLayoutType() {
 // Session name validation
 // ---------------------------------------------------------------------------
 
-function validateSessionName(name) {
-    const errorEl = document.getElementById('session-name-error');
-    const input = document.getElementById('session-name-input');
-    if (!name) {
-        errorEl.classList.add('hidden');
-        input.classList.remove('invalid');
-        return false;
-    }
-    if (!SESSION_NAME_RE.test(name)) {
-        errorEl.textContent = 'Only letters, digits, hyphens, and underscores allowed.';
-        errorEl.classList.remove('hidden');
-        input.classList.add('invalid');
-        return false;
-    }
-    errorEl.classList.add('hidden');
-    input.classList.remove('invalid');
-    return true;
-}
-
 // ---------------------------------------------------------------------------
 // Centralized macro analysis + form state
 // ---------------------------------------------------------------------------
