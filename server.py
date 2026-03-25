@@ -2,14 +2,16 @@ from __future__ import annotations
 
 """tmux-dash server: HTTP API + static file serving + session lifecycle.
 
-When TLS_CERT and TLS_KEY point to valid files (e.g. from `tailscale cert`),
+When TLS_CERT and TLS_KEY point to valid files (e.g. from ``tailscale cert``),
 the server terminates TLS directly.  All ttyd terminal traffic is reverse-
 proxied through the dashboard port so only one port needs to be exposed.
+
+Session routes are scoped under ``/api/hosts/{host_id}/sessions/...`` and
+the terminal proxy lives at ``/terminal/{host_id}/{session_name}/...``.
 """
 
 import asyncio
 import logging
-import math
 import ssl
 import time
 from pathlib import Path
@@ -26,6 +28,7 @@ from config import (
     TLS_CERT,
     TLS_KEY,
 )
+from host_config import HostConfig
 from session_manager import SessionManager
 
 log = logging.getLogger(__name__)
@@ -45,9 +48,7 @@ def _get_client_count() -> int:
 
 # ---------------------------------------------------------------------------
 # Middleware: track active HTTP connections as a proxy for "someone is using
-# the dashboard".  An SSE or WebSocket connection would be more precise, but
-# the spec says poll-based frontend, so counting in-flight requests is the
-# simplest correct signal.
+# the dashboard".
 # ---------------------------------------------------------------------------
 
 
@@ -62,7 +63,7 @@ async def client_tracking_middleware(request: web.Request, handler):
 
 
 # ---------------------------------------------------------------------------
-# API routes
+# API routes — hosts
 # ---------------------------------------------------------------------------
 
 
@@ -70,31 +71,110 @@ async def handle_index(_request: web.Request) -> web.FileResponse:
     return web.FileResponse(STATIC_DIR / "index.html")
 
 
+async def handle_hosts(request: web.Request) -> web.Response:
+    """Return the configured host list with runtime status."""
+    mgr: SessionManager = request.app["session_manager"]
+    host_config: HostConfig = request.app["host_config"]
+
+    hosts = host_config.list_hosts()
+    statuses = mgr.get_host_statuses()
+
+    result = []
+    for h in hosts:
+        st = statuses.get(h["id"], {})
+        result.append({
+            **h,
+            "status": st.get("status", "unknown"),
+            "status_message": st.get("message", ""),
+        })
+
+    return web.json_response({"hosts": result})
+
+
+async def handle_add_host(request: web.Request) -> web.Response:
+    """Add a new SSH host."""
+    host_config: HostConfig = request.app["host_config"]
+    mgr: SessionManager = request.app["session_manager"]
+
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON body"}, status=400)
+
+    label = body.get("label", "").strip()
+    ssh_alias = body.get("ssh_alias", "").strip()
+
+    if not label:
+        return web.json_response({"error": "'label' is required"}, status=400)
+    if not ssh_alias:
+        return web.json_response(
+            {"error": "'ssh_alias' is required"}, status=400
+        )
+
+    try:
+        entry = host_config.add_host(label, ssh_alias)
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=409)
+
+    mgr.reload_hosts()
+    return web.json_response(entry, status=201)
+
+
+async def handle_remove_host(request: web.Request) -> web.Response:
+    """Remove a configured host."""
+    host_config: HostConfig = request.app["host_config"]
+    mgr: SessionManager = request.app["session_manager"]
+    host_id = request.match_info["host_id"]
+
+    try:
+        removed = host_config.remove_host(host_id)
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+
+    if not removed:
+        return web.json_response(
+            {"error": f"Host '{host_id}' not found"}, status=404
+        )
+
+    # Clean up sessions and ttyd processes for the removed host.
+    for name in list(mgr.sessions_for_host(host_id)):
+        await mgr._kill_ttyd(host_id, name)
+
+    mgr.reload_hosts()
+    return web.json_response({"id": host_id, "deleted": True})
+
+
+# ---------------------------------------------------------------------------
+# API routes — sessions (host-scoped)
+# ---------------------------------------------------------------------------
+
+
 async def handle_sessions(request: web.Request) -> web.Response:
     mgr: SessionManager = request.app["session_manager"]
+    host_id = request.match_info["host_id"]
 
     page = _int_param(request, "page", 1)
     page_size = _int_param(request, "page_size", SESSION_PAGE_SIZE)
 
-    data = mgr.get_sessions(page=page, page_size=page_size)
+    data = mgr.get_sessions(host_id, page=page, page_size=page_size)
     return web.json_response(data)
 
 
 async def handle_panes(request: web.Request) -> web.Response:
     mgr: SessionManager = request.app["session_manager"]
+    host_id = request.match_info["host_id"]
     session_name = request.match_info["session_name"]
 
-    if session_name not in mgr.sessions:
+    host_sessions = mgr.sessions_for_host(host_id)
+    if session_name not in host_sessions:
         return web.json_response(
             {"error": f"Session '{session_name}' not found"},
             status=404,
         )
 
-    panes = await mgr.get_panes(session_name)
+    panes = await mgr.get_panes(host_id, session_name)
 
-    # Build ttyd_url from the inbound request host so the browser can reach
-    # the ttyd instance directly (same hostname, different port).
-    host = request.host.split(":")[0]  # strip port from Host header
+    host = request.host.split(":")[0]
     for pane in panes:
         port = pane.pop("port", None)
         pane["ttyd_url"] = f"http://{host}:{port}" if port else None
@@ -103,27 +183,26 @@ async def handle_panes(request: web.Request) -> web.Response:
 
 
 async def handle_session_detail(request: web.Request) -> web.Response:
-    """Return metadata and ttyd_url for a single session.
-
-    ttyd_url is a same-origin path through the reverse proxy so it works
-    transparently over both HTTP and HTTPS.
-    """
+    """Return metadata and ttyd_url for a single session."""
     mgr: SessionManager = request.app["session_manager"]
+    host_id = request.match_info["host_id"]
     session_name = request.match_info["session_name"]
 
-    sess = mgr.sessions.get(session_name)
+    host_sessions = mgr.sessions_for_host(host_id)
+    sess = host_sessions.get(session_name)
     if sess is None:
         return web.json_response(
             {"error": f"Session '{session_name}' not found"},
             status=404,
         )
 
-    # Proxy-based relative URL — the browser inherits scheme + host.
+    safe_host = urlquote(host_id, safe="")
     safe_name = urlquote(session_name, safe="")
-    ttyd_url = f"/terminal/{safe_name}/" if sess.port else None
+    ttyd_url = f"/terminal/{safe_host}/{safe_name}/" if sess.port else None
 
     return web.json_response({
         "name": sess.name,
+        "host_id": sess.host_id,
         "windows": sess.windows,
         "attached": sess.attached,
         "created_epoch": sess.created_epoch,
@@ -134,9 +213,10 @@ async def handle_session_detail(request: web.Request) -> web.Response:
 async def handle_thumbnail(request: web.Request) -> web.Response:
     """Return an SVG snapshot thumbnail for a session."""
     mgr: SessionManager = request.app["session_manager"]
+    host_id = request.match_info["host_id"]
     session_name = request.match_info["session_name"]
 
-    svg = await mgr.get_thumbnail_svg(session_name)
+    svg = await mgr.get_thumbnail_svg(host_id, session_name)
     if svg is None:
         return web.json_response(
             {"error": f"Session '{session_name}' not found"},
@@ -153,17 +233,24 @@ async def handle_thumbnail(request: web.Request) -> web.Response:
 async def handle_health(request: web.Request) -> web.Response:
     mgr: SessionManager = request.app["session_manager"]
     uptime = time.monotonic() - request.app["start_time"]
+
+    # Count total sessions across all hosts.
+    total = sum(
+        len(sessions)
+        for sessions in mgr._host_sessions.values()
+    )
+
     return web.json_response({
         "status": "ok",
-        "sessions": len(mgr.sessions),
+        "sessions": total,
         "uptime": round(uptime, 1),
     })
 
 
-
 async def handle_create_session(request: web.Request) -> web.Response:
-    """Create a new tmux session."""
+    """Create a new tmux session on a host."""
     mgr: SessionManager = request.app["session_manager"]
+    host_id = request.match_info["host_id"]
 
     try:
         body = await request.json()
@@ -179,7 +266,7 @@ async def handle_create_session(request: web.Request) -> web.Response:
     layout_spec = body.get("layout_spec") or None
 
     result = await mgr.create_session(
-        name, cwd=cwd, layout_type=layout_type, layout_spec=layout_spec
+        host_id, name, cwd=cwd, layout_type=layout_type, layout_spec=layout_spec
     )
 
     if "error" in result:
@@ -192,9 +279,10 @@ async def handle_create_session(request: web.Request) -> web.Response:
 async def handle_delete_session(request: web.Request) -> web.Response:
     """Delete (kill) an existing tmux session."""
     mgr: SessionManager = request.app["session_manager"]
+    host_id = request.match_info["host_id"]
     session_name = request.match_info["session_name"]
 
-    result = await mgr.delete_session(session_name)
+    result = await mgr.delete_session(host_id, session_name)
 
     if "error" in result:
         status = 404 if "not found" in result["error"] else 500
@@ -204,11 +292,20 @@ async def handle_delete_session(request: web.Request) -> web.Response:
 
 
 async def handle_path_completion(request: web.Request) -> web.Response:
-    """Return directory completions for a path prefix."""
+    """Return directory completions for a path prefix (localhost only)."""
     mgr: SessionManager = request.app["session_manager"]
+    host_id = request.match_info["host_id"]
+
+    # Path completion only makes sense for localhost.
+    host_config: HostConfig = request.app["host_config"]
+    host = host_config.get_host(host_id)
+    if host is None or host["type"] != "local":
+        return web.json_response({"completions": []})
+
     prefix = request.query.get("prefix", "")
     completions = mgr.list_directories(prefix)
     return web.json_response({"completions": completions})
+
 
 # ---------------------------------------------------------------------------
 # ttyd reverse proxy — forwards HTTP and WebSocket to the per-session ttyd
@@ -231,29 +328,32 @@ def _proxy_request_headers(request: web.Request) -> dict[str, str]:
     }
 
 
-def _ttyd_target(request: web.Request) -> tuple[str | None, int | None]:
-    """Resolve the session name from the route and return (session_name, port).
+def _ttyd_target(request: web.Request) -> tuple[str | None, str | None, int | None]:
+    """Resolve (host_id, session_name, port) from the route.
 
-    Returns (None, None) when the session doesn't exist or has no port.
+    Returns (None, None, None) when the session doesn't exist or has no port.
     """
+    host_id = request.match_info["host_id"]
     session_name = request.match_info["session_name"]
     mgr: SessionManager = request.app["session_manager"]
-    sess = mgr.sessions.get(session_name)
+    host_sessions = mgr.sessions_for_host(host_id)
+    sess = host_sessions.get(session_name)
     if sess is None or sess.port is None:
-        return None, None
-    return session_name, sess.port
+        return None, None, None
+    return host_id, session_name, sess.port
 
 
 async def handle_terminal(request: web.Request) -> web.Response | web.WebSocketResponse:
     """Reverse-proxy HTTP and WebSocket requests to the session's ttyd."""
-    session_name, port = _ttyd_target(request)
+    host_id, session_name, port = _ttyd_target(request)
     if port is None:
         return web.Response(status=502, text="Terminal not available")
 
-    # Reconstruct the full path ttyd expects (it was started with --base-path).
+    # Reconstruct the full path ttyd expects (started with --base-path).
+    safe_host = urlquote(host_id, safe="")
     safe_name = urlquote(session_name, safe="")
     suffix = request.match_info.get("path", "")
-    target = f"http://127.0.0.1:{port}/terminal/{safe_name}/{suffix}"
+    target = f"http://127.0.0.1:{port}/terminal/{safe_host}/{safe_name}/{suffix}"
     if request.query_string:
         target += f"?{request.query_string}"
 
@@ -275,9 +375,11 @@ async def _proxy_http(request: web.Request, target: str) -> web.Response:
             allow_redirects=False,
         ) as resp:
             body = await resp.read()
-            # Relay content headers only; drop hop-by-hop from response too.
             headers: dict[str, str] = {}
-            for h in ("Content-Type", "Content-Encoding", "Cache-Control", "ETag", "Last-Modified"):
+            for h in (
+                "Content-Type", "Content-Encoding", "Cache-Control",
+                "ETag", "Last-Modified",
+            ):
                 if h in resp.headers:
                     headers[h] = resp.headers[h]
             return web.Response(status=resp.status, body=body, headers=headers)
@@ -287,16 +389,14 @@ async def _proxy_http(request: web.Request, target: str) -> web.Response:
 
 
 async def _proxy_ws(request: web.Request, target: str) -> web.WebSocketResponse:
-    """Bridge a WebSocket between the browser and ttyd.
-
-    Runs two concurrent forwarding loops; when either side closes or errors
-    the other is torn down promptly.
-    """
+    """Bridge a WebSocket between the browser and ttyd."""
     # Negotiate subprotocol with the browser (ttyd uses 'tty').
     protocols: tuple[str, ...] = ()
     proto_header = request.headers.get("Sec-WebSocket-Protocol", "")
     if proto_header:
-        protocols = tuple(p.strip() for p in proto_header.split(",") if p.strip())
+        protocols = tuple(
+            p.strip() for p in proto_header.split(",") if p.strip()
+        )
 
     ws_server = web.WebSocketResponse(protocols=protocols)
     await ws_server.prepare(request)
@@ -306,6 +406,7 @@ async def _proxy_ws(request: web.Request, target: str) -> web.WebSocketResponse:
 
     try:
         async with cs.ws_connect(ws_url, protocols=protocols) as ws_client:
+
             async def _fwd_client_to_server():
                 """ttyd → browser."""
                 async for msg in ws_client:
@@ -315,7 +416,12 @@ async def _proxy_ws(request: web.Request, target: str) -> web.WebSocketResponse:
                         await ws_server.send_str(msg.data)
                     elif msg.type == aiohttp.WSMsgType.BINARY:
                         await ws_server.send_bytes(msg.data)
-                    elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSING, aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                    elif msg.type in (
+                        aiohttp.WSMsgType.CLOSE,
+                        aiohttp.WSMsgType.CLOSING,
+                        aiohttp.WSMsgType.CLOSED,
+                        aiohttp.WSMsgType.ERROR,
+                    ):
                         break
 
             async def _fwd_server_to_client():
@@ -325,7 +431,12 @@ async def _proxy_ws(request: web.Request, target: str) -> web.WebSocketResponse:
                         await ws_client.send_str(msg.data)
                     elif msg.type == aiohttp.WSMsgType.BINARY:
                         await ws_client.send_bytes(msg.data)
-                    elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSING, aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                    elif msg.type in (
+                        aiohttp.WSMsgType.CLOSE,
+                        aiohttp.WSMsgType.CLOSING,
+                        aiohttp.WSMsgType.CLOSED,
+                        aiohttp.WSMsgType.ERROR,
+                    ):
                         break
 
             done, pending = await asyncio.wait(
@@ -374,10 +485,14 @@ def _build_ssl_context() -> ssl.SSLContext | None:
     key_path = Path(TLS_KEY)
 
     if not cert_path.is_file():
-        log.warning("TLS_CERT=%s does not exist; falling back to plain HTTP", TLS_CERT)
+        log.warning(
+            "TLS_CERT=%s does not exist; falling back to plain HTTP", TLS_CERT
+        )
         return None
     if not key_path.is_file():
-        log.warning("TLS_KEY=%s does not exist; falling back to plain HTTP", TLS_KEY)
+        log.warning(
+            "TLS_KEY=%s does not exist; falling back to plain HTTP", TLS_KEY
+        )
         return None
 
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -392,37 +507,37 @@ def _build_ssl_context() -> ssl.SSLContext | None:
 
 
 async def on_startup(app: web.Application) -> None:
-    mgr = SessionManager()
+    host_config = HostConfig()
+    app["host_config"] = host_config
+
+    mgr = SessionManager(host_config)
     app["session_manager"] = mgr
     app["start_time"] = time.monotonic()
 
-    # Shared HTTP client for the reverse proxy.  Disable auto-decompression
-    # so compressed responses (e.g. ttyd's 711 KB gzipped HTML) are forwarded
-    # to the browser as-is instead of being inflated and re-sent uncompressed.
+    # Shared HTTP client for the reverse proxy.
     app["client_session"] = aiohttp.ClientSession(auto_decompress=False)
 
-    # Kill orphaned ttyd processes from a previous server run so their
-    # ports are freed before we start spawning new ones.
+    # Kill orphaned ttyd processes from a previous server run.
     await mgr._kill_stale_ttyd()
 
-
-    # Run an initial poll immediately so the API has data before the first
-    # client connects.
+    # Run an initial poll so the API has data before the first client connects.
     await mgr.poll_sessions()
 
-    # Start the background polling loop (does not block — creates a task).
+    # Start the background polling loop.
     app["poll_task"] = asyncio.create_task(
         mgr.start_polling(_get_client_count),
         name="session-poll-driver",
     )
 
     scheme = "https" if app.get("_tls_enabled") else "http"
+    total = sum(len(s) for s in mgr._host_sessions.values())
     log.info(
-        "tmux-dash started on %s://%s:%d — %d session(s) discovered",
+        "tmux-dash started on %s://%s:%d — %d session(s) discovered across %d host(s)",
         scheme,
         DASHBOARD_HOST,
         DASHBOARD_PORT,
-        len(mgr.sessions),
+        total,
+        len(host_config.list_hosts()),
     )
 
 
@@ -448,19 +563,47 @@ async def on_cleanup(app: web.Application) -> None:
 def build_app() -> web.Application:
     app = web.Application(middlewares=[client_tracking_middleware])
 
-    # API routes
+    # Root
     app.router.add_get("/", handle_index)
-    app.router.add_get("/api/sessions", handle_sessions)
-    app.router.add_get("/api/sessions/{session_name}/panes", handle_panes)
-    app.router.add_get("/api/sessions/{session_name}/thumbnail.svg", handle_thumbnail)
-    app.router.add_post("/api/sessions", handle_create_session)
-    app.router.add_delete("/api/sessions/{session_name}", handle_delete_session)
-    app.router.add_get("/api/completions/path", handle_path_completion)
-    app.router.add_get("/api/sessions/{session_name}", handle_session_detail)
+
+    # Host management
+    app.router.add_get("/api/hosts", handle_hosts)
+    app.router.add_post("/api/hosts", handle_add_host)
+    app.router.add_delete("/api/hosts/{host_id}", handle_remove_host)
+
+    # Health
     app.router.add_get("/api/health", handle_health)
 
-    # ttyd reverse proxy — catch-all under /terminal/{session_name}/
-    app.router.add_route("*", "/terminal/{session_name}/{path:.*}", handle_terminal)
+    # Host-scoped session routes
+    app.router.add_get(
+        "/api/hosts/{host_id}/sessions", handle_sessions
+    )
+    app.router.add_post(
+        "/api/hosts/{host_id}/sessions", handle_create_session
+    )
+    app.router.add_get(
+        "/api/hosts/{host_id}/sessions/{session_name}", handle_session_detail
+    )
+    app.router.add_delete(
+        "/api/hosts/{host_id}/sessions/{session_name}", handle_delete_session
+    )
+    app.router.add_get(
+        "/api/hosts/{host_id}/sessions/{session_name}/panes", handle_panes
+    )
+    app.router.add_get(
+        "/api/hosts/{host_id}/sessions/{session_name}/thumbnail.svg",
+        handle_thumbnail,
+    )
+    app.router.add_get(
+        "/api/hosts/{host_id}/completions/path", handle_path_completion
+    )
+
+    # ttyd reverse proxy — host-scoped catch-all
+    app.router.add_route(
+        "*",
+        "/terminal/{host_id}/{session_name}/{path:.*}",
+        handle_terminal,
+    )
 
     # Static files
     app.router.add_static("/static", STATIC_DIR, show_index=False)
@@ -486,7 +629,6 @@ def main() -> None:
 
     ssl_ctx = _build_ssl_context()
     app = build_app()
-    # Stash flag so on_startup can log the correct scheme.
     app["_tls_enabled"] = ssl_ctx is not None
 
     web.run_app(
