@@ -1,11 +1,16 @@
 // panoptic frontend — vanilla JS, no frameworks
 // All DOM IDs must match index.html exactly.
 
+import { createTerminal } from '/static/terminal.js';
+
 let currentHostId = 'localhost';  // active host tab
 let currentPage = 1;
 let currentSession = null;  // session name while in session view, null for dashboard
 let sessionPollTimer = null;
 let hostPollTimer = null;
+
+// Active terminal handle (non-null while session view is open).
+let _terminalHandle = null;
 
 // Keyed reconciliation state: session name -> card DOM element.
 const _cardMap = new Map();
@@ -453,7 +458,7 @@ function renderPagination(page, totalPages) {
 }
 
 // ---------------------------------------------------------------------------
-// Session view — single terminal iframe
+// Session view — direct xterm.js terminal (no iframe)
 // ---------------------------------------------------------------------------
 
 async function openSession(sessionName) {
@@ -472,14 +477,19 @@ async function openSession(sessionName) {
 }
 
 async function loadSessionTerminal(sessionName) {
-    const iframe = document.getElementById('terminal-iframe');
+    // Dispose any previous terminal before creating a new one.
+    if (_terminalHandle) {
+        _terminalHandle.dispose();
+        _terminalHandle = null;
+    }
+
+    const container = document.getElementById('terminal-container');
     const hostId = encodeURIComponent(currentHostId);
     const safeName = encodeURIComponent(sessionName);
 
     try {
         const resp = await fetch(`/api/hosts/${hostId}/sessions/${safeName}`);
         if (!resp.ok) {
-            iframe.removeAttribute('src');
             showBanner(
                 resp.status === 404
                     ? `Session "${sessionName}" no longer exists.`
@@ -491,15 +501,13 @@ async function loadSessionTerminal(sessionName) {
         const data = await resp.json();
 
         if (!data.ttyd_url) {
-            iframe.removeAttribute('src');
             showBanner(`Session "${sessionName}" has no terminal available (port not assigned).`);
             return;
         }
 
         hideBanner();
-        iframe.src = data.ttyd_url;
+        _terminalHandle = createTerminal(container, data.ttyd_url);
     } catch (err) {
-        iframe.removeAttribute('src');
         showBanner(`Failed to connect to session: ${err.message}`);
     }
 }
@@ -508,11 +516,13 @@ function closeSession() {
     currentSession = null;
     closeAllMenus();
 
+    if (_terminalHandle) {
+        _terminalHandle.dispose();
+        _terminalHandle = null;
+    }
+
     document.getElementById('session-view').classList.add('hidden');
     document.getElementById('dashboard-view').classList.remove('hidden');
-
-    const iframe = document.getElementById('terminal-iframe');
-    iframe.removeAttribute('src');
 
     history.pushState(null, '', '/?host=' + encodeURIComponent(currentHostId));
 

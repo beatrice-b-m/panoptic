@@ -12,6 +12,7 @@
     <link rel="icon" href="/static/icon-dark.svg" type="image/svg+xml">
     <link rel="apple-touch-icon" href="/static/icon-dark.svg">
     <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="/static/vendor/xterm/xterm.css">
 </head>
 <body>
     <!-- Warning banner (hidden by default) -->
@@ -63,10 +64,7 @@
                 </div>
             </div>
         </div>
-        <div class="terminal-container">
-            <iframe id="terminal-iframe" class="terminal-iframe" allowfullscreen
-                    allow="clipboard-read; clipboard-write"></iframe>
-        </div>
+        <div id="terminal-container" class="terminal-container"></div>
     </div>
 
     <!-- New session modal -->
@@ -250,7 +248,7 @@
         </div>
     </div>
 
-    <script src="/static/app.js"></script>
+    <script type="module" src="/static/app.js"></script>
     <script>
     if ('serviceWorker' in navigator) {
         navigator.serviceWorker.register('/sw.js').catch(() => {});
