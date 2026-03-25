@@ -1,11 +1,12 @@
 // tmux-dash frontend — vanilla JS, no frameworks
 // All DOM IDs must match index.html exactly.
 
+let currentHostId = 'localhost';  // active host tab
 let currentPage = 1;
 let currentSession = null;  // session name while in session view, null for dashboard
 let sessionPollTimer = null;
 
-// Keyed reconciliation state: session name → card DOM element.
+// Keyed reconciliation state: session name -> card DOM element.
 const _cardMap = new Map();
 
 // Fetch sequence counter — prevents stale responses from overwriting newer UI.
@@ -17,6 +18,9 @@ let _pendingDelete = null;  // { name, attached, source: 'gallery'|'session' }
 // Auto-hide timer for success banner.
 let _successTimer = null;
 
+// Cached host list from last fetch.
+let _hosts = [];
+
 // ---------------------------------------------------------------------------
 // Theme
 // ---------------------------------------------------------------------------
@@ -26,12 +30,10 @@ function initTheme() {
     if (saved === 'dark' || saved === 'light') {
         applyTheme(saved);
     } else {
-        // Follow system preference when no explicit choice is stored.
         const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
         applyTheme(prefersDark ? 'dark' : 'light');
     }
 
-    // React to OS-level theme changes — only when the user hasn't overridden.
     window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (e) => {
         if (!localStorage.getItem('theme')) {
             applyTheme(e.matches ? 'dark' : 'light');
@@ -43,7 +45,6 @@ function applyTheme(theme) {
     document.documentElement.setAttribute('data-theme', theme);
     const btn = document.getElementById('theme-toggle');
     if (btn) {
-        // Sun for dark mode (click to go light), moon for light mode (click to go dark).
         btn.textContent = theme === 'dark' ? '\u2600' : '\u263E';
         btn.title = theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme';
     }
@@ -71,11 +72,6 @@ function formatAge(epochSeconds) {
     return `${diffDays}d ago`;
 }
 
-/**
- * Returns a timestamp bucket that changes every ~30 seconds.
- * Used as a cache-buster for thumbnail URLs so the browser
- * re-fetches roughly every 30s without hammering on every poll.
- */
 function thumbnailBucket() {
     return Math.floor(Date.now() / 30000);
 }
@@ -113,8 +109,17 @@ function hideSuccessBanner() {
     document.getElementById('success-banner').classList.add('hidden');
 }
 
+function escapeHtml(str) {
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
 // ---------------------------------------------------------------------------
-// Refresh status (spinner + last-updated)
+// Refresh status
 // ---------------------------------------------------------------------------
 
 function setRefreshing(active) {
@@ -124,6 +129,87 @@ function setRefreshing(active) {
     } else {
         spinner.classList.add('hidden');
     }
+}
+
+// ---------------------------------------------------------------------------
+// Host tabs
+// ---------------------------------------------------------------------------
+
+async function fetchHosts() {
+    try {
+        const resp = await fetch('/api/hosts');
+        if (!resp.ok) return;
+        const data = await resp.json();
+        _hosts = data.hosts || [];
+        renderHostTabs();
+    } catch (err) {
+        // Silently fail; host tabs stay as-is.
+    }
+}
+
+function renderHostTabs() {
+    const container = document.getElementById('host-tabs');
+    container.innerHTML = '';
+
+    for (const host of _hosts) {
+        const tab = document.createElement('button');
+        tab.className = 'host-tab' + (host.id === currentHostId ? ' active' : '');
+        tab.role = 'tab';
+        tab.setAttribute('aria-selected', host.id === currentHostId ? 'true' : 'false');
+        tab.dataset.hostId = host.id;
+
+        // Status indicator
+        const dot = document.createElement('span');
+        dot.className = 'host-tab-status';
+        if (host.status === 'ok') {
+            dot.classList.add('ok');
+        } else if (host.status === 'auth_error' || host.status === 'unreachable' || host.status === 'error') {
+            dot.classList.add('error');
+            tab.title = host.status_message || host.status;
+        }
+        tab.appendChild(dot);
+
+        const label = document.createElement('span');
+        label.className = 'host-tab-label';
+        label.textContent = host.label;
+        tab.appendChild(label);
+
+        tab.addEventListener('click', () => switchHost(host.id));
+        container.appendChild(tab);
+    }
+
+    // "+" button to add a new host
+    const addBtn = document.createElement('button');
+    addBtn.className = 'host-tab host-tab-add';
+    addBtn.title = 'Add SSH host';
+    addBtn.textContent = '+';
+    addBtn.addEventListener('click', openAddHostModal);
+    container.appendChild(addBtn);
+}
+
+function switchHost(hostId) {
+    if (hostId === currentHostId && !currentSession) return;
+
+    currentHostId = hostId;
+    currentPage = 1;
+
+    // If in session view, close it.
+    if (currentSession) {
+        closeSession();
+    }
+
+    // Clear card map for the new host.
+    _cardMap.forEach((card) => card.remove());
+    _cardMap.clear();
+
+    // Update tab appearance.
+    renderHostTabs();
+
+    // Update URL.
+    history.pushState(null, '', '/?host=' + encodeURIComponent(hostId));
+
+    // Restart polling for the new host.
+    startSessionPolling();
 }
 
 // ---------------------------------------------------------------------------
@@ -151,12 +237,13 @@ async function fetchSessions(page = 1) {
     const seq = ++_fetchSeq;
     setRefreshing(true);
 
+    const hostId = encodeURIComponent(currentHostId);
+
     try {
-        const resp = await fetch(`/api/sessions?page=${page}&page_size=8`);
+        const resp = await fetch(`/api/hosts/${hostId}/sessions?page=${page}&page_size=8`);
         if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${resp.statusText}`);
         const data = await resp.json();
 
-        // Guard: discard if a newer fetch already landed.
         if (seq !== _fetchSeq) return;
 
         hideBanner();
@@ -173,6 +260,9 @@ async function fetchSessions(page = 1) {
     } finally {
         if (seq === _fetchSeq) setRefreshing(false);
     }
+
+    // Also refresh host statuses periodically.
+    fetchHosts();
 }
 
 function renderSessions(data) {
@@ -184,7 +274,6 @@ function renderSessions(data) {
         emptyState.classList.remove('hidden');
         grid.classList.add('hidden');
         paginationEl.classList.add('hidden');
-        // Clear card map since we're showing empty state.
         _cardMap.forEach((card) => card.remove());
         _cardMap.clear();
         return;
@@ -193,10 +282,8 @@ function renderSessions(data) {
     emptyState.classList.add('hidden');
     grid.classList.remove('hidden');
 
-    // Build set of incoming session names for this page.
     const incoming = new Set(data.sessions.map(s => s.name));
 
-    // Remove cards no longer present on this page.
     for (const [name, card] of _cardMap) {
         if (!incoming.has(name)) {
             card.remove();
@@ -204,7 +291,6 @@ function renderSessions(data) {
         }
     }
 
-    // Create or update cards, then reorder by appending in server order.
     for (const session of data.sessions) {
         let card = _cardMap.get(session.name);
         if (card) {
@@ -213,7 +299,6 @@ function renderSessions(data) {
             card = createCard(session);
             _cardMap.set(session.name, card);
         }
-        // Appending an already-parented node just moves it — no flicker.
         grid.appendChild(card);
     }
 
@@ -226,12 +311,13 @@ function createCard(session) {
     card.dataset.sessionName = session.name;
 
     const safeName = encodeURIComponent(session.name);
+    const safeHost = encodeURIComponent(currentHostId);
     const attachedClass = session.attached ? 'active' : '';
 
     card.innerHTML = `
         <div class="session-thumbnail-wrap">
             <img class="session-thumbnail"
-                 src="/api/sessions/${safeName}/thumbnail.svg?t=${thumbnailBucket()}"
+                 src="/api/hosts/${safeHost}/sessions/${safeName}/thumbnail.svg?t=${thumbnailBucket()}"
                  alt=""
                  loading="lazy"
                  onerror="this.style.display='none'">
@@ -255,7 +341,6 @@ function createCard(session) {
         </div>
     `;
 
-    // Wire event listeners.
     card.querySelector('.open-btn').addEventListener('click', () => {
         openSession(session.name);
     });
@@ -274,35 +359,30 @@ function createCard(session) {
 
 function updateCard(card, session) {
     const safeName = encodeURIComponent(session.name);
+    const safeHost = encodeURIComponent(currentHostId);
 
-    // Update attached indicator.
     const indicator = card.querySelector('.attached-indicator');
     indicator.classList.toggle('active', session.attached);
 
-    // Update window count.
     const badge = card.querySelector('.window-badge');
     const badgeText = `${session.windows} window${session.windows !== 1 ? 's' : ''}`;
     if (badge.textContent !== badgeText) badge.textContent = badgeText;
 
-    // Update session age.
     const age = card.querySelector('.session-age');
     const ageText = formatAge(session.created_epoch);
     if (age.textContent !== ageText) age.textContent = ageText;
 
-    // Refresh thumbnail src only when the bucket changes (every ~30s).
     const img = card.querySelector('.session-thumbnail');
     if (img) {
-        const expectedSrc = `/api/sessions/${safeName}/thumbnail.svg?t=${thumbnailBucket()}`;
+        const expectedSrc = `/api/hosts/${safeHost}/sessions/${safeName}/thumbnail.svg?t=${thumbnailBucket()}`;
         if (!img.src.endsWith(expectedSrc)) {
             img.src = expectedSrc;
             img.style.display = '';
         }
     }
 
-    // Update the delete button's closure with current attached state.
     const deleteBtn = card.querySelector('.card-delete-btn');
     if (deleteBtn) {
-        // Replace listener by cloning — avoids stale closure on `attached`.
         const fresh = deleteBtn.cloneNode(true);
         fresh.addEventListener('click', (e) => {
             e.stopPropagation();
@@ -330,7 +410,6 @@ function renderPagination(page, totalPages) {
         btn.textContent = String(i);
         btn.addEventListener('click', () => {
             currentPage = i;
-            // Clear card map on page change — different page, different cards.
             _cardMap.forEach((card) => card.remove());
             _cardMap.clear();
             fetchSessions(i);
@@ -353,16 +432,18 @@ async function openSession(sessionName) {
     stopSessionPolling();
     closeAllMenus();
 
-    history.pushState(null, '', '/?session=' + encodeURIComponent(sessionName));
+    history.pushState(null, '', '/?host=' + encodeURIComponent(currentHostId) + '&session=' + encodeURIComponent(sessionName));
 
     await loadSessionTerminal(sessionName);
 }
 
 async function loadSessionTerminal(sessionName) {
     const iframe = document.getElementById('terminal-iframe');
+    const hostId = encodeURIComponent(currentHostId);
+    const safeName = encodeURIComponent(sessionName);
 
     try {
-        const resp = await fetch(`/api/sessions/${encodeURIComponent(sessionName)}`);
+        const resp = await fetch(`/api/hosts/${hostId}/sessions/${safeName}`);
         if (!resp.ok) {
             iframe.removeAttribute('src');
             showBanner(
@@ -396,26 +477,12 @@ function closeSession() {
     document.getElementById('session-view').classList.add('hidden');
     document.getElementById('dashboard-view').classList.remove('hidden');
 
-    // Clear iframe src to drop the WebSocket connection to ttyd.
     const iframe = document.getElementById('terminal-iframe');
     iframe.removeAttribute('src');
 
-    history.pushState(null, '', '/');
+    history.pushState(null, '', '/?host=' + encodeURIComponent(currentHostId));
 
     startSessionPolling();
-}
-
-// ---------------------------------------------------------------------------
-// HTML escaping — required when building innerHTML from server data
-// ---------------------------------------------------------------------------
-
-function escapeHtml(str) {
-    return String(str)
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#39;');
 }
 
 // ---------------------------------------------------------------------------
@@ -479,8 +546,11 @@ async function confirmDeleteSession() {
     confirmBtn.disabled = true;
     confirmBtn.textContent = 'Deleting\u2026';
 
+    const hostId = encodeURIComponent(currentHostId);
+    const safeName = encodeURIComponent(name);
+
     try {
-        const resp = await fetch(`/api/sessions/${encodeURIComponent(name)}`, {
+        const resp = await fetch(`/api/hosts/${hostId}/sessions/${safeName}`, {
             method: 'DELETE',
         });
         const data = await resp.json();
@@ -494,18 +564,15 @@ async function confirmDeleteSession() {
         closeDeleteModal();
 
         if (source === 'session' && currentSession === name) {
-            // Deleting the session we're currently viewing — return to gallery.
             closeSession();
             showSuccessBanner(`Session "${name}" deleted.`);
         } else {
-            // Gallery view: remove card immediately, then reconcile via poll.
             const card = _cardMap.get(name);
             if (card) {
                 card.remove();
                 _cardMap.delete(name);
             }
             showSuccessBanner(`Session "${name}" deleted.`);
-            // Trigger an immediate refresh to reconcile counts and pagination.
             fetchSessions(currentPage);
         }
     } catch (err) {
@@ -520,8 +587,8 @@ async function confirmDeleteSession() {
 
 const SESSION_NAME_RE = /^[A-Za-z0-9_-]+$/;
 
-let _cwdAbort = null;       // AbortController for in-flight completion fetch
-let _cwdActiveIndex = -1;   // keyboard-navigated index inside autocomplete list
+let _cwdAbort = null;
+let _cwdActiveIndex = -1;
 
 function openNewSessionModal() {
     document.getElementById('new-session-modal').classList.remove('hidden');
@@ -591,9 +658,11 @@ async function fetchCompletions(prefix) {
     if (_cwdAbort) _cwdAbort.abort();
     _cwdAbort = new AbortController();
 
+    const hostId = encodeURIComponent(currentHostId);
+
     try {
         const resp = await fetch(
-            `/api/completions/path?prefix=${encodeURIComponent(prefix)}`,
+            `/api/hosts/${hostId}/completions/path?prefix=${encodeURIComponent(prefix)}`,
             { signal: _cwdAbort.signal }
         );
         if (!resp.ok) return [];
@@ -620,7 +689,6 @@ function showCompletions(items) {
         el.className = 'autocomplete-item';
         el.textContent = items[i];
         el.addEventListener('mousedown', (e) => {
-            // mousedown so it fires before blur hides the dropdown.
             e.preventDefault();
             selectCompletion(items[i]);
         });
@@ -637,7 +705,6 @@ function hideCompletions() {
 function selectCompletion(path) {
     document.getElementById('session-cwd-input').value = path;
     hideCompletions();
-    // Trigger another fetch since the selected path is a directory — show its children.
     onCwdInput();
 }
 
@@ -723,7 +790,6 @@ function updateLayoutPreview() {
     previewEl.innerHTML = '';
 
     if (type === 'row') {
-        // Each entry in counts = number of horizontal panes in that row.
         for (const paneCount of counts) {
             const row = document.createElement('div');
             row.className = 'layout-preview-row';
@@ -735,7 +801,6 @@ function updateLayoutPreview() {
             previewEl.appendChild(row);
         }
     } else {
-        // Column layout: one row containing N columns, each column has M stacked panes.
         const row = document.createElement('div');
         row.className = 'layout-preview-row';
         for (const paneCount of counts) {
@@ -802,8 +867,10 @@ async function submitNewSession(e) {
     createBtn.disabled = true;
     createBtn.textContent = 'Creating\u2026';
 
+    const hostId = encodeURIComponent(currentHostId);
+
     try {
-        const resp = await fetch('/api/sessions', {
+        const resp = await fetch(`/api/hosts/${hostId}/sessions`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
@@ -820,7 +887,6 @@ async function submitNewSession(e) {
         closeNewSessionModal();
         hideBanner();
 
-        // Open the newly created session directly.
         openSession(data.name);
     } catch (err) {
         showBanner(`Failed to create session: ${err.message}`);
@@ -831,12 +897,86 @@ async function submitNewSession(e) {
 }
 
 // ---------------------------------------------------------------------------
+// Add SSH host modal
+// ---------------------------------------------------------------------------
+
+function openAddHostModal() {
+    document.getElementById('add-host-modal').classList.remove('hidden');
+    document.getElementById('host-label-input').value = '';
+    document.getElementById('host-alias-input').value = '';
+    document.getElementById('add-host-error').classList.add('hidden');
+    document.getElementById('host-label-input').focus();
+}
+
+function closeAddHostModal() {
+    document.getElementById('add-host-modal').classList.add('hidden');
+}
+
+async function submitAddHost(e) {
+    e.preventDefault();
+
+    const labelInput = document.getElementById('host-label-input');
+    const aliasInput = document.getElementById('host-alias-input');
+    const addBtn = document.getElementById('add-host-btn');
+    const errorEl = document.getElementById('add-host-error');
+
+    const label = labelInput.value.trim();
+    const ssh_alias = aliasInput.value.trim();
+
+    if (!label || !ssh_alias) {
+        errorEl.textContent = 'Both label and SSH alias are required.';
+        errorEl.classList.remove('hidden');
+        return;
+    }
+
+    addBtn.disabled = true;
+    addBtn.textContent = 'Adding\u2026';
+
+    try {
+        const resp = await fetch('/api/hosts', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ label, ssh_alias }),
+        });
+        const data = await resp.json();
+
+        if (!resp.ok) {
+            errorEl.textContent = data.error || `HTTP ${resp.status}`;
+            errorEl.classList.remove('hidden');
+            return;
+        }
+
+        closeAddHostModal();
+        showSuccessBanner(`Host "${data.label}" added.`);
+
+        // Refresh hosts and switch to the new host.
+        await fetchHosts();
+        switchHost(data.id);
+    } catch (err) {
+        errorEl.textContent = `Failed to add host: ${err.message}`;
+        errorEl.classList.remove('hidden');
+    } finally {
+        addBtn.disabled = false;
+        addBtn.textContent = 'Add Host';
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Browser history (back/forward)
 // ---------------------------------------------------------------------------
 
 window.addEventListener('popstate', () => {
     const params = new URLSearchParams(window.location.search);
+    const host = params.get('host') || 'localhost';
     const session = params.get('session');
+
+    if (host !== currentHostId) {
+        currentHostId = host;
+        currentPage = 1;
+        _cardMap.forEach((card) => card.remove());
+        _cardMap.clear();
+        renderHostTabs();
+    }
 
     if (session) {
         if (currentSession !== session) {
@@ -850,6 +990,8 @@ window.addEventListener('popstate', () => {
     } else {
         if (currentSession !== null) {
             closeSession();
+        } else {
+            startSessionPolling();
         }
     }
 });
@@ -886,7 +1028,6 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     cwdInput.addEventListener('keydown', onCwdKeydown);
     cwdInput.addEventListener('blur', () => {
-        // Small delay so mousedown on dropdown item fires first.
         setTimeout(hideCompletions, 150);
     });
 
@@ -907,9 +1048,6 @@ document.addEventListener('DOMContentLoaded', () => {
         e.stopPropagation();
         closeAllMenus();
         if (currentSession) {
-            // Look up attached state from the card map or fetch it.
-            // The session-view doesn't cache attached state, so default to
-            // checking the card if it exists; otherwise assume possibly attached.
             const card = _cardMap.get(currentSession);
             const indicator = card ? card.querySelector('.attached-indicator') : null;
             const attached = indicator ? indicator.classList.contains('active') : true;
@@ -921,6 +1059,11 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('confirm-delete-btn').addEventListener('click', confirmDeleteSession);
     document.getElementById('cancel-delete-btn').addEventListener('click', closeDeleteModal);
     document.getElementById('delete-modal-backdrop').addEventListener('click', closeDeleteModal);
+
+    // Add host modal
+    document.getElementById('add-host-form').addEventListener('submit', submitAddHost);
+    document.getElementById('cancel-add-host').addEventListener('click', closeAddHostModal);
+    document.getElementById('add-host-backdrop').addEventListener('click', closeAddHostModal);
 
     // Global: close menus on outside click
     document.addEventListener('click', () => {
@@ -941,16 +1084,32 @@ document.addEventListener('DOMContentLoaded', () => {
             const newModal = document.getElementById('new-session-modal');
             if (!newModal.classList.contains('hidden')) {
                 closeNewSessionModal();
+                return;
+            }
+
+            const addHostModal = document.getElementById('add-host-modal');
+            if (!addHostModal.classList.contains('hidden')) {
+                closeAddHostModal();
+                return;
             }
         }
     });
 
-    // Check URL for ?session= param to restore session view on direct load/reload.
+    // Read URL params and init host + session.
     const params = new URLSearchParams(window.location.search);
-    const session = params.get('session');
-    if (session) {
-        openSession(session);
-    } else {
-        startSessionPolling();
+    const hostParam = params.get('host');
+    const sessionParam = params.get('session');
+
+    if (hostParam) {
+        currentHostId = hostParam;
     }
+
+    // Fetch hosts, render tabs, then start session polling or open session.
+    fetchHosts().then(() => {
+        if (sessionParam) {
+            openSession(sessionParam);
+        } else {
+            startSessionPolling();
+        }
+    });
 });

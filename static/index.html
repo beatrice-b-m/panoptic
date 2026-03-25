@@ -15,15 +15,24 @@
     <div id="dashboard-view">
         <header class="header">
             <h1 class="header-title">tmux<span>-dash</span></h1>
-            <span id="session-count" class="session-count-badge">0 sessions</span>
-            <button id="new-session-btn" class="new-session-btn" title="Create new session">+ New</button>
             <div class="header-spacer"></div>
             <span id="last-refreshed" class="last-refreshed">&mdash;</span>
             <span id="refresh-spinner" class="refresh-spinner hidden"></span>
             <button id="theme-toggle" class="theme-toggle" title="Toggle theme" aria-label="Toggle theme"></button>
         </header>
 
+        <!-- Host tab bar -->
+        <nav id="host-tabs" class="host-tabs" role="tablist">
+            <!-- Populated by JS; always ends with the + button -->
+        </nav>
+
         <main class="main-content">
+            <!-- Session toolbar (host-specific controls) -->
+            <div class="session-toolbar">
+                <span id="session-count" class="session-count-badge">0 sessions</span>
+                <button id="new-session-btn" class="new-session-btn" title="Create new session">+ New</button>
+            </div>
+
             <div id="session-grid" class="session-grid"></div>
             <div id="empty-state" class="empty-state hidden">
                 <div class="empty-state-icon">&#8505;&#65039;</div>
@@ -107,6 +116,42 @@
                 <button type="button" id="cancel-delete-btn" class="btn-secondary">Cancel</button>
                 <button type="button" id="confirm-delete-btn" class="btn-danger">Delete</button>
             </div>
+        </div>
+    </div>
+
+    <!-- Add SSH host modal -->
+    <div id="add-host-modal" class="hidden">
+        <div class="modal-backdrop" id="add-host-backdrop"></div>
+        <div class="modal-content">
+            <h2 class="modal-title">Add SSH Host</h2>
+            <form id="add-host-form" autocomplete="off">
+                <div class="form-group">
+                    <label for="host-label-input">Label</label>
+                    <input id="host-label-input" class="form-input" type="text"
+                           placeholder="My Server" required>
+                    <div class="form-hint">Display name for the host tab.</div>
+                </div>
+                <div class="form-group">
+                    <label for="host-alias-input">SSH Alias</label>
+                    <input id="host-alias-input" class="form-input" type="text"
+                           placeholder="myserver" required>
+                    <div class="form-hint">
+                        The host alias from your <code>~/.ssh/config</code>. All authentication
+                        (keys, agent, ProxyJump, etc.) is handled by OpenSSH &mdash;
+                        tmux-dash never stores passwords or private keys.
+                    </div>
+                </div>
+                <div id="add-host-error" class="form-error hidden"></div>
+                <div class="form-info">
+                    Hosts that require a password without an SSH agent or ControlMaster
+                    session will fail background polling. Use key-based auth or establish
+                    a connection beforehand.
+                </div>
+                <div class="form-actions">
+                    <button type="button" id="cancel-add-host" class="btn-secondary">Cancel</button>
+                    <button type="submit" id="add-host-btn" class="btn-primary">Add Host</button>
+                </div>
+            </form>
         </div>
     </div>
 
