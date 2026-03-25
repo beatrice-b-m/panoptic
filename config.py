@@ -47,6 +47,11 @@ HOSTS_CONFIG_PATH = os.getenv(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "hosts.json"),
 )
 
+TEMPLATES_CONFIG_PATH = os.getenv(
+    "TEMPLATES_CONFIG_PATH",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates.json"),
+)
+
 # SSH tunables for remote host polling (BatchMode is always on).
 SSH_CONNECT_TIMEOUT = int(os.getenv("SSH_CONNECT_TIMEOUT", "5"))
 
@@ -82,6 +87,7 @@ class RuntimeSettings:
     tls_cert: str = TLS_CERT
     tls_key: str = TLS_KEY
     hosts_config_path: str = HOSTS_CONFIG_PATH
+    templates_config_path: str = TEMPLATES_CONFIG_PATH
     ssh_connect_timeout: int = SSH_CONNECT_TIMEOUT
     headless: bool = False
 

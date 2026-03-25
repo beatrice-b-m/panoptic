@@ -25,6 +25,7 @@ from urllib.parse import quote as urlquote
 
 from config import RuntimeSettings
 from host_config import HostConfig
+from template_macros import contains_placeholders
 
 log = logging.getLogger(__name__)
 
@@ -662,15 +663,92 @@ class SessionManager:
         return True
 
     @staticmethod
-    def _parse_layout_spec(spec: str) -> list[int] | None:
-        """Parse colon-separated positive integers.  Returns None on invalid."""
-        try:
-            counts = [int(x) for x in spec.split(":")]
-            if counts and all(c >= 1 for c in counts):
-                return counts
-        except ValueError:
-            pass
-        return None
+    def _parse_layout_spec(spec: str) -> tuple[list[int], list[str]] | None:
+        """Parse a Beamux-compatible layout spec.
+
+        Segments are colon-separated.  Each segment is either:
+          - a positive integer  (e.g. '2')  → that many panes, no default command
+          - comma-separated commands (e.g. 'npm run dev,jest')  → one pane per command
+
+        Returns ``(counts, commands)`` where *counts* has one int per segment
+        (total panes in that segment) and *commands* is a flat list of default
+        commands in pane order (empty string when no command was specified).
+
+        Returns None when the spec is empty or fundamentally unparseable.
+        """
+        if not spec or not spec.strip():
+            return None
+
+        segments = spec.split(':')
+        counts: list[int] = []
+        commands: list[str] = []
+
+        for seg in segments:
+            seg = seg.strip()
+            if not seg:
+                return None  # empty segment (e.g. '2::3')
+
+            # Try pure integer first.
+            try:
+                n = int(seg)
+                if n < 1:
+                    return None
+                counts.append(n)
+                commands.extend([''] * n)
+                continue
+            except ValueError:
+                pass
+
+            # Command segment: comma-separated command strings, one pane each.
+            cmds = [c.strip() for c in seg.split(',')]
+            if not cmds or any(c == '' for c in cmds):
+                return None  # empty command in segment (e.g. 'vim,,ls')
+            counts.append(len(cmds))
+            commands.extend(cmds)
+
+        if not counts:
+            return None
+        return counts, commands
+
+    @staticmethod
+    def _merge_pane_commands(
+        spec_commands: list[str],
+        overlay_commands: list[str] | None,
+        total_panes: int,
+    ) -> list[str]:
+        """Merge layout-spec default commands with explicit overlay commands.
+
+        For each pane index, the overlay command takes precedence if non-empty;
+        otherwise the spec-embedded command (if any) is used.
+        """
+        result: list[str] = []
+        overlay = overlay_commands or []
+        for i in range(total_panes):
+            ov = overlay[i] if i < len(overlay) else ''
+            sp = spec_commands[i] if i < len(spec_commands) else ''
+            result.append(ov if ov else sp)
+        return result
+
+    async def _send_pane_commands(
+        self, host_id: str, session_name: str, commands: list[str],
+    ) -> None:
+        """Send shell commands to panes via ``tmux send-keys``.
+
+        Panes are addressed by index within window 0 (the default window
+        created by new-session + split operations).
+        """
+        for i, cmd in enumerate(commands):
+            if not cmd:
+                continue
+            rc, _, _ = await self._run_tmux(
+                host_id, "send-keys", "-t", f"{session_name}:0.{i}", cmd, "Enter"
+            )
+            if rc != 0:
+                log.warning(
+                    "send-keys failed for %s/%s pane %d: cmd=%r",
+                    host_id, session_name, i, cmd,
+                )
+
 
     # ------------------------------------------------------- session CRUD
 
@@ -681,11 +759,43 @@ class SessionManager:
         cwd: str | None = None,
         layout_type: str | None = None,
         layout_spec: str | None = None,
+        pane_commands: list[str] | None = None,
+        *,
+        _from_template: bool = False,
     ) -> dict:
         """Create a new tmux session on a host.
 
+        When *_from_template* is False (direct create), brace characters in any
+        text field are rejected — macro placeholders are template-only.
+
+        *pane_commands* is an optional list of shell commands, one per pane.
+        If shorter than the total pane count, remaining panes get no command.
+        An entry of ``''`` means "no command for this pane".
+
         Returns session info dict on success, or ``{"error": "..."}`` on failure.
         """
+        # --- macro guard for direct (non-template) create ---
+        if not _from_template:
+            for field_name, value in [("name", name), ("cwd", cwd or ""), ("layout_spec", layout_spec or "")]:
+                if contains_placeholders(value):
+                    return {
+                        "error": (
+                            f"Macro placeholders are only allowed in templates. "
+                            f"Field '{field_name}' contains '{{' or '}}'. "
+                            f"Save as a template first."
+                        )
+                    }
+            if pane_commands:
+                for i, cmd in enumerate(pane_commands):
+                    if contains_placeholders(cmd):
+                        return {
+                            "error": (
+                                f"Macro placeholders are only allowed in templates. "
+                                f"Pane command {i} contains '{{' or '}}'. "
+                                f"Save as a template first."
+                            )
+                        }
+
         if not SESSION_NAME_RE.match(name):
             return {
                 "error": f"Invalid session name {name!r}: must match ^[A-Za-z0-9_-]+$"
@@ -707,6 +817,7 @@ class SessionManager:
                 return {"error": f"cwd {cwd!r} is not a directory"}
 
         counts: list[int] | None = None
+        spec_commands: list[str] = []
         if layout_type is not None:
             if layout_type not in ("row", "col"):
                 return {
@@ -716,11 +827,12 @@ class SessionManager:
                 return {
                     "error": "layout_spec is required when layout_type is provided"
                 }
-            counts = self._parse_layout_spec(layout_spec)
-            if counts is None:
+            parsed = self._parse_layout_spec(layout_spec)
+            if parsed is None:
                 return {
-                    "error": f"Invalid layout_spec {layout_spec!r}: must be colon-separated positive integers"
+                    "error": f"Invalid layout_spec {layout_spec!r}: use colon-separated integers or command segments (e.g. '2:1' or 'vim,ls:3')"
                 }
+            counts, spec_commands = parsed
 
         tmux_args = ["new-session", "-d", "-s", name]
         if cwd is not None:
@@ -738,6 +850,14 @@ class SessionManager:
             )
             if not ok:
                 log.warning("Layout application failed for %s/%s", host_id, name)
+
+        # --- dispatch pane commands ---
+        total_panes = sum(counts) if counts else 1
+        effective_commands = self._merge_pane_commands(
+            spec_commands, pane_commands, total_panes
+        )
+        if any(effective_commands):
+            await self._send_pane_commands(host_id, name, effective_commands)
 
         await self._poll_host_sessions(host_id)
 
