@@ -61,6 +61,10 @@ function applyTheme(theme) {
         btn.textContent = theme === 'dark' ? '\u2600' : '\u263E';
         btn.title = theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme';
     }
+    // Keep the PWA theme-color in sync so the browser chrome matches.
+    const metaTheme = document.querySelector('meta[name="theme-color"]:not([media])') ||
+                      document.querySelector('meta[name="theme-color"]');
+    if (metaTheme) metaTheme.content = theme === 'dark' ? '#141418' : '#f0f0f5';
 }
 
 function toggleTheme() {

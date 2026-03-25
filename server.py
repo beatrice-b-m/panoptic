@@ -78,6 +78,17 @@ async def handle_index(_request: web.Request) -> web.FileResponse:
     return web.FileResponse(STATIC_DIR / "index.html")
 
 
+async def handle_service_worker(_request: web.Request) -> web.FileResponse:
+    """Serve sw.js from the root scope with the permissive scope header."""
+    resp = web.FileResponse(STATIC_DIR / "sw.js")
+    resp.headers["Service-Worker-Allowed"] = "/"
+    return resp
+
+
+async def handle_manifest(_request: web.Request) -> web.FileResponse:
+    return web.FileResponse(STATIC_DIR / "manifest.json")
+
+
 async def handle_hosts(request: web.Request) -> web.Response:
     """Return the configured host list with runtime status."""
     mgr: SessionManager = request.app["session_manager"]
@@ -820,6 +831,8 @@ def build_app(settings: RuntimeSettings) -> web.Application:
 
     # Root
     app.router.add_get("/", handle_index)
+    app.router.add_get("/sw.js", handle_service_worker)
+    app.router.add_get("/manifest.json", handle_manifest)
 
     # Host management
     app.router.add_get("/api/hosts", handle_hosts)

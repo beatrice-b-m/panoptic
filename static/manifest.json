@@ -1,0 +1,24 @@
+{
+  "name": "tmux-dash",
+  "short_name": "tmux-dash",
+  "description": "Browser-based tmux session monitor and terminal interface",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#141418",
+  "theme_color": "#141418",
+  "icons": [
+    {
+      "src": "/static/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/static/icon-maskable.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    }
+  ]
+}

@@ -3,7 +3,14 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#141418" media="(prefers-color-scheme: dark)">
+    <meta name="theme-color" content="#f0f0f5" media="(prefers-color-scheme: light)">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <title>tmux-dash</title>
+    <link rel="manifest" href="/manifest.json">
+    <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+    <link rel="apple-touch-icon" href="/static/icon.svg">
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -57,7 +64,8 @@
             </div>
         </div>
         <div class="terminal-container">
-            <iframe id="terminal-iframe" class="terminal-iframe" allowfullscreen></iframe>
+            <iframe id="terminal-iframe" class="terminal-iframe" allowfullscreen
+                    allow="clipboard-read; clipboard-write"></iframe>
         </div>
     </div>
 
@@ -243,5 +251,10 @@
     </div>
 
     <script src="/static/app.js"></script>
+    <script>
+    if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('/sw.js').catch(() => {});
+    }
+    </script>
 </body>
 </html>
