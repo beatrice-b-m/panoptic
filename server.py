@@ -23,6 +23,8 @@ from aiohttp import web
 from config import RuntimeSettings
 from host_config import HostConfig
 from session_manager import SessionManager
+from template_macros import validate_placeholders, extract_variables, render, contains_placeholders
+from template_store import TemplateStore
 
 log = logging.getLogger(__name__)
 
@@ -265,9 +267,11 @@ async def handle_create_session(request: web.Request) -> web.Response:
     cwd = body.get("cwd") or None
     layout_type = body.get("layout_type") or None
     layout_spec = body.get("layout_spec") or None
+    pane_commands = body.get("pane_commands") or None
 
     result = await mgr.create_session(
-        host_id, name, cwd=cwd, layout_type=layout_type, layout_spec=layout_spec
+        host_id, name, cwd=cwd, layout_type=layout_type,
+        layout_spec=layout_spec, pane_commands=pane_commands,
     )
 
     if "error" in result:
@@ -306,6 +310,240 @@ async def handle_path_completion(request: web.Request) -> web.Response:
     prefix = request.query.get("prefix", "")
     completions = mgr.list_directories(prefix)
     return web.json_response({"completions": completions})
+
+
+# ---------------------------------------------------------------------------
+# API routes — templates
+# ---------------------------------------------------------------------------
+
+
+async def handle_list_templates(request: web.Request) -> web.Response:
+    """Return all templates with extracted macro variable names per template."""
+    store: TemplateStore = request.app["template_store"]
+    templates = store.list_templates()
+
+    result = []
+    for t in templates:
+        fields = [t["name"], t["directory"], t["layout_spec"]]
+        fields.extend(t.get("pane_commands", []))
+        variables = extract_variables(fields)
+        result.append({**t, "variables": variables})
+
+    return web.json_response({"templates": result})
+
+
+async def handle_create_template(request: web.Request) -> web.Response:
+    """Save a new template from the current form state."""
+    store: TemplateStore = request.app["template_store"]
+
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON body"}, status=400)
+
+    template_name = body.get("template_name", "").strip()
+    if not template_name:
+        return web.json_response({"error": "'template_name' is required"}, status=400)
+
+    name = body.get("name", "").strip()
+    directory = body.get("directory", "").strip()
+    layout_type = body.get("layout_type", "none").strip()
+    layout_spec = body.get("layout_spec", "").strip()
+    pane_commands = body.get("pane_commands", [])
+
+    if not isinstance(pane_commands, list):
+        return web.json_response({"error": "'pane_commands' must be an array"}, status=400)
+
+    # Validate macro placeholders in all template content fields.
+    for label, text in [("name", name), ("directory", directory),
+                        ("layout_spec", layout_spec)]:
+        try:
+            validate_placeholders(text)
+        except ValueError as exc:
+            return web.json_response(
+                {"error": f"Invalid placeholder in '{label}': {exc}"}, status=400
+            )
+    for i, cmd in enumerate(pane_commands):
+        try:
+            validate_placeholders(cmd)
+        except ValueError as exc:
+            return web.json_response(
+                {"error": f"Invalid placeholder in pane command {i}: {exc}"}, status=400
+            )
+
+    try:
+        entry = store.add_template(
+            template_name, name, directory, layout_type, layout_spec, pane_commands
+        )
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=409)
+
+    # Attach extracted variables for immediate frontend use.
+    fields = [name, directory, layout_spec] + pane_commands
+    entry["variables"] = extract_variables(fields)
+    return web.json_response(entry, status=201)
+
+
+async def handle_update_template(request: web.Request) -> web.Response:
+    """Update all content fields of an existing template (keeps template_name)."""
+    store: TemplateStore = request.app["template_store"]
+    template_name = request.match_info["template_name"]
+
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON body"}, status=400)
+
+    name = body.get("name", "").strip()
+    directory = body.get("directory", "").strip()
+    layout_type = body.get("layout_type", "none").strip()
+    layout_spec = body.get("layout_spec", "").strip()
+    pane_commands = body.get("pane_commands", [])
+
+    if not isinstance(pane_commands, list):
+        return web.json_response({"error": "'pane_commands' must be an array"}, status=400)
+
+    # Validate macro placeholders.
+    for label, text in [("name", name), ("directory", directory),
+                        ("layout_spec", layout_spec)]:
+        try:
+            validate_placeholders(text)
+        except ValueError as exc:
+            return web.json_response(
+                {"error": f"Invalid placeholder in '{label}': {exc}"}, status=400
+            )
+    for i, cmd in enumerate(pane_commands):
+        try:
+            validate_placeholders(cmd)
+        except ValueError as exc:
+            return web.json_response(
+                {"error": f"Invalid placeholder in pane command {i}: {exc}"}, status=400
+            )
+
+    try:
+        entry = store.update_template(
+            template_name, name, directory, layout_type, layout_spec, pane_commands
+        )
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=404)
+
+    fields = [name, directory, layout_spec] + pane_commands
+    entry["variables"] = extract_variables(fields)
+    return web.json_response(entry)
+
+
+async def handle_rename_template(request: web.Request) -> web.Response:
+    """Rename a template (PATCH with {"new_name": "..."})."""
+    store: TemplateStore = request.app["template_store"]
+    template_name = request.match_info["template_name"]
+
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON body"}, status=400)
+
+    new_name = body.get("new_name", "").strip()
+    if not new_name:
+        return web.json_response({"error": "'new_name' is required"}, status=400)
+
+    try:
+        entry = store.rename_template(template_name, new_name)
+    except ValueError as exc:
+        msg = str(exc)
+        status = 404 if "not found" in msg else 409
+        return web.json_response({"error": msg}, status=status)
+
+    return web.json_response(entry)
+
+
+async def handle_delete_template(request: web.Request) -> web.Response:
+    """Delete a template by name."""
+    store: TemplateStore = request.app["template_store"]
+    template_name = request.match_info["template_name"]
+
+    deleted = store.delete_template(template_name)
+    if not deleted:
+        return web.json_response(
+            {"error": f"Template '{template_name}' not found"}, status=404
+        )
+
+    return web.json_response({"template_name": template_name, "deleted": True})
+
+
+async def handle_create_from_template(request: web.Request) -> web.Response:
+    """Create a new tmux session by rendering a template with variable values."""
+    store: TemplateStore = request.app["template_store"]
+    mgr: SessionManager = request.app["session_manager"]
+    host_id = request.match_info["host_id"]
+
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON body"}, status=400)
+
+    template_name = body.get("template_name", "").strip()
+    if not template_name:
+        return web.json_response({"error": "'template_name' is required"}, status=400)
+
+    tpl = store.get_template(template_name)
+    if tpl is None:
+        return web.json_response(
+            {"error": f"Template '{template_name}' not found"}, status=404
+        )
+
+    variables: dict[str, str] = body.get("variables", {})
+    if not isinstance(variables, dict):
+        return web.json_response({"error": "'variables' must be an object"}, status=400)
+
+    # Collect all template content fields for rendering.
+    fields = [tpl["name"], tpl["directory"], tpl["layout_spec"]]
+    fields.extend(tpl.get("pane_commands", []))
+
+    # Validate that all required variables are provided and non-empty.
+    required_vars = extract_variables(fields)
+    missing = [v for v in required_vars if not variables.get(v, "").strip()]
+    if missing:
+        return web.json_response(
+            {"error": f"Missing or empty variables: {', '.join(missing)}"}, status=400
+        )
+
+    # Render all template fields.
+    try:
+        rendered_name = render(tpl["name"], variables)
+        rendered_dir = render(tpl["directory"], variables)
+        rendered_spec = render(tpl["layout_spec"], variables)
+        rendered_cmds = [render(c, variables) for c in tpl.get("pane_commands", [])]
+    except ValueError as exc:
+        return web.json_response({"error": f"Render error: {exc}"}, status=400)
+
+    # Allow optional overlay pane_commands from the request.
+    overlay_commands = body.get("pane_commands")
+    if overlay_commands is not None and not isinstance(overlay_commands, list):
+        return web.json_response({"error": "'pane_commands' must be an array"}, status=400)
+
+    # Merge: explicit overlay > rendered template commands.
+    effective_commands = overlay_commands if overlay_commands is not None else rendered_cmds
+
+    # Determine layout.
+    layout_type = tpl["layout_type"] if tpl["layout_type"] != "none" else None
+    layout_spec = rendered_spec if layout_type else None
+
+    result = await mgr.create_session(
+        host_id,
+        rendered_name,
+        cwd=rendered_dir or None,
+        layout_type=layout_type,
+        layout_spec=layout_spec,
+        pane_commands=effective_commands or None,
+        _from_template=True,
+    )
+
+    if "error" in result:
+        status = 409 if "already exists" in result["error"] else 400
+        return web.json_response(result, status=status)
+
+    return web.json_response(result, status=201)
+
 
 
 # ---------------------------------------------------------------------------
@@ -515,6 +753,9 @@ async def on_startup(app: web.Application) -> None:
     host_config = HostConfig(path=settings.hosts_config_path)
     app["host_config"] = host_config
 
+    template_store = TemplateStore(path=settings.templates_config_path)
+    app["template_store"] = template_store
+
     mgr = SessionManager(host_config, settings)
     app["session_manager"] = mgr
     app["start_time"] = time.monotonic()
@@ -608,6 +849,18 @@ def build_app(settings: RuntimeSettings) -> web.Application:
     )
     app.router.add_get(
         "/api/hosts/{host_id}/completions/path", handle_path_completion
+    )
+
+    # Template management
+    app.router.add_get("/api/templates", handle_list_templates)
+    app.router.add_post("/api/templates", handle_create_template)
+    app.router.add_put("/api/templates/{template_name}", handle_update_template)
+    app.router.add_patch("/api/templates/{template_name}", handle_rename_template)
+    app.router.add_delete("/api/templates/{template_name}", handle_delete_template)
+
+    # Template-based session creation
+    app.router.add_post(
+        "/api/hosts/{host_id}/sessions/from-template", handle_create_from_template
     )
 
     # ttyd reverse proxy — host-scoped catch-all
