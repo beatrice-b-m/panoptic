@@ -24,6 +24,7 @@ A lightweight web dashboard that discovers your tmux sessions and exposes each o
 - **Macro variables** -- templates support `{var}` placeholders that are filled at launch time; all variables must be provided before creation
 - **Pane startup commands** -- assign shell commands to individual panes via the layout preview; commands run after session creation
 - **Mixed layout specs** -- layout spec now supports command segments (e.g. `vim,jest:3`) in addition to pure numeric specs
+- **Installable PWA** -- add to home screen on mobile or desktop; app-shell caching for instant loads
 
 ## Prerequisites
 
@@ -68,10 +69,10 @@ Verify the install: `ttyd --version`.
 
 ```bash
 git clone https://github.com/youruser/tmux-local-dash && cd tmux-local-dash
-./install.sh
+./setup-service.sh
 ```
 
-The install script installs dependencies via Homebrew, substitutes paths in the launchd plist, copies it to `~/Library/LaunchAgents/`, and loads the service.
+This installs dependencies (ttyd, aiohttp), registers a launchd plist, and **starts tmux-dash as a persistent background service**. The server launches on boot and restarts automatically if it crashes. Open `http://localhost:7680` once the script finishes.
 
 ## Quick Start (Ubuntu / Linux)
 
@@ -87,7 +88,7 @@ To run as a persistent service, see [systemd Setup](#systemd-setup-linux) below.
 
 ## Manual Setup
 
-If you prefer not to use `install.sh` (macOS) or want a minimal install on any platform:
+If you prefer not to use `setup-service.sh` (macOS) or want a minimal install on any platform:
 
 ```bash
 # 1. Install ttyd (see platform instructions above)
@@ -426,7 +427,7 @@ journalctl --user -u tmux-dash -f
 **macOS:**
 
 ```bash
-./install.sh --uninstall
+./setup-service.sh --uninstall
 ```
 
 This unloads the launchd service and removes the plist from `~/Library/LaunchAgents/`. It does not delete the project directory or installed pip packages.
