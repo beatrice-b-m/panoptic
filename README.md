@@ -1,4 +1,4 @@
-# tmux-dash
+# panoptic
 
 A lightweight web dashboard that discovers your tmux sessions and exposes each one as a live terminal in the browser via [ttyd](https://github.com/tsl0922/ttyd). Supports multiple hosts — monitor local and remote machines from a single dashboard.
 
@@ -7,7 +7,7 @@ A lightweight web dashboard that discovers your tmux sessions and exposes each o
 ## Features
 
 - **Multi-host support** -- monitor tmux sessions on localhost and remote SSH hosts from one dashboard; host tabs switch context instantly
-- **SSH alias-first model** -- remote hosts use your `~/.ssh/config` aliases; tmux-dash never stores passwords or private keys
+- **SSH alias-first model** -- remote hosts use your `~/.ssh/config` aliases; panoptic never stores passwords or private keys
 - **Automatic session discovery** -- polls tmux every 5 s (active) / 30 s (idle), no manual registration
 - **Single terminal view** -- clicking a session opens one full ttyd terminal showing the real tmux layout (panes, splits, status bar); up to 19 concurrent sessions across all hosts
 - **Session thumbnails** -- each gallery card shows a live text snapshot (SVG) of the session, refreshed approximately every 30 seconds
@@ -72,7 +72,7 @@ git clone https://github.com/youruser/tmux-local-dash && cd tmux-local-dash
 ./setup-service.sh
 ```
 
-This installs dependencies (ttyd, aiohttp), registers a launchd plist, and **starts tmux-dash as a persistent background service**. The server launches on boot and restarts automatically if it crashes. Open `http://localhost:7680` once the script finishes.
+This installs dependencies (ttyd, aiohttp), registers a launchd plist, and **starts panoptic as a persistent background service**. The server launches on boot and restarts automatically if it crashes. Open `http://localhost:7680` once the script finishes.
 
 ## Quick Start (Ubuntu / Linux)
 
@@ -81,7 +81,7 @@ git clone https://github.com/youruser/tmux-local-dash && cd tmux-local-dash
 pip3 install aiohttp
 
 # Start in foreground
-python3 tmux_dash_cli.py serve
+python3 panoptic_cli.py serve
 ```
 
 To run as a persistent service, see [systemd Setup](#systemd-setup-linux) below.
@@ -97,7 +97,7 @@ If you prefer not to use `setup-service.sh` (macOS) or want a minimal install on
 pip3 install aiohttp
 
 # 3. Start the server (foreground)
-python3 tmux_dash_cli.py serve
+python3 panoptic_cli.py serve
 ```
 
 Open `http://localhost:7680`. Press `Ctrl+C` to stop.
@@ -107,16 +107,16 @@ The CLI provides a `serve` subcommand with full control over runtime settings:
 
 ```bash
 # Start with defaults
-python3 tmux_dash_cli.py serve
+python3 panoptic_cli.py serve
 
 # Custom port
-python3 tmux_dash_cli.py serve --port 8080
+python3 panoptic_cli.py serve --port 8080
 
 # Custom log level
-python3 tmux_dash_cli.py serve --log-level DEBUG
+python3 panoptic_cli.py serve --log-level DEBUG
 
 # See all flags
-python3 tmux_dash_cli.py serve --help
+python3 panoptic_cli.py serve --help
 ```
 
 All flags have sensible defaults from `config.py`. Passing no flags is equivalent to the previous `python3 server.py` behavior.
@@ -127,8 +127,8 @@ Use `--headless` on a remote server where no browser is available. This forces a
 
 ```bash
 # On the remote server
-python3 tmux_dash_cli.py serve --headless
-python3 tmux_dash_cli.py serve --headless --port 8080
+python3 panoptic_cli.py serve --headless
+python3 panoptic_cli.py serve --headless --port 8080
 ```
 
 Then from your local machine:
@@ -143,14 +143,14 @@ Browse `http://127.0.0.1:7680` locally. All terminal traffic is reverse-proxied 
 
 ```bash
 # This will fail with a clear error:
-python3 tmux_dash_cli.py serve --headless --host 0.0.0.0
+python3 panoptic_cli.py serve --headless --host 0.0.0.0
 ```
 
 ## Multi-Host Setup
 
 ### How it works
 
-tmux-dash can monitor tmux sessions on remote machines over SSH. The architecture is simple:
+panoptic can monitor tmux sessions on remote machines over SSH. The architecture is simple:
 
 1. **Polling:** The server runs `ssh <alias> tmux list-sessions` periodically to discover remote sessions.
 2. **Terminal access:** Each remote session gets a local ttyd process that runs `ssh <alias> tmux -u attach-session -t <name>`.
@@ -166,7 +166,7 @@ The host appears as a new tab. Sessions are discovered on the next poll cycle.
 
 ### SSH configuration
 
-All authentication and connection options are handled by OpenSSH via your `~/.ssh/config`. tmux-dash never stores passwords or private keys.
+All authentication and connection options are handled by OpenSSH via your `~/.ssh/config`. panoptic never stores passwords or private keys.
 
 Example `~/.ssh/config` entry:
 
@@ -239,7 +239,7 @@ The terminal font defaults to **Hack Nerd Font** with a fallback chain of Hack N
 
 ```bash
 export TTYD_FONT_FAMILY="JetBrains Mono, Fira Code, monospace"
-python3 tmux_dash_cli.py serve
+python3 panoptic_cli.py serve
 ```
 
 The font must be installed on the **client device** (the browser). The setting is passed to each ttyd instance at spawn time via `-t fontFamily=...`.
@@ -306,20 +306,20 @@ To serve the dashboard over HTTPS using Tailscale-provisioned certificates:
 
 ```bash
 tailscale cert \
-  --cert-file ~/.local/share/tmux-dash/cert.pem \
-  --key-file  ~/.local/share/tmux-dash/key.pem \
+  --cert-file ~/.local/share/panoptic/cert.pem \
+  --key-file  ~/.local/share/panoptic/key.pem \
   beas-mac-mini.fable-cobia.ts.net
 ```
 
 ### 2. Configure the server
 
 ```bash
-export TLS_CERT=~/.local/share/tmux-dash/cert.pem
-export TLS_KEY=~/.local/share/tmux-dash/key.pem
-python3 tmux_dash_cli.py serve
+export TLS_CERT=~/.local/share/panoptic/cert.pem
+export TLS_KEY=~/.local/share/panoptic/key.pem
+python3 panoptic_cli.py serve
 ```
 
-Or pass them as CLI flags: `python3 tmux_dash_cli.py serve --tls-cert /path/to/cert.pem --tls-key /path/to/key.pem`. For launchd, add them to the plist's `EnvironmentVariables` dict. For systemd, add `Environment=` directives to the unit override.
+Or pass them as CLI flags: `python3 panoptic_cli.py serve --tls-cert /path/to/cert.pem --tls-key /path/to/key.pem`. For launchd, add them to the plist's `EnvironmentVariables` dict. For systemd, add `Environment=` directives to the unit override.
 
 ### 3. Access
 
@@ -366,40 +366,40 @@ Each tmux session gets its own local `ttyd` process on a port from the pool. For
 
 ### launchd (macOS)
 
-The service label is `com.user.tmux-dash`.
+The service label is `com.user.panoptic`.
 
 ```bash
 # Load and start
-launchctl load ~/Library/LaunchAgents/com.user.tmux-dash.plist
+launchctl load ~/Library/LaunchAgents/com.user.panoptic.plist
 
 # Stop and unload
-launchctl unload ~/Library/LaunchAgents/com.user.tmux-dash.plist
+launchctl unload ~/Library/LaunchAgents/com.user.panoptic.plist
 
 # Check status
-launchctl list | grep tmux-dash
+launchctl list | grep panoptic
 
 # Restart
-launchctl unload ~/Library/LaunchAgents/com.user.tmux-dash.plist
-launchctl load  ~/Library/LaunchAgents/com.user.tmux-dash.plist
+launchctl unload ~/Library/LaunchAgents/com.user.panoptic.plist
+launchctl load  ~/Library/LaunchAgents/com.user.panoptic.plist
 ```
 
 ### systemd Setup (Linux)
 
-A systemd user unit is provided in `tmux-dash.service`. Install it:
+A systemd user unit is provided in `panoptic.service`. Install it:
 
 ```bash
 # Edit the unit file: replace __INSTALL_DIR__ with the actual project path
-sed "s|__INSTALL_DIR__|$(pwd)|g" tmux-dash.service > ~/.config/systemd/user/tmux-dash.service
+sed "s|__INSTALL_DIR__|$(pwd)|g" panoptic.service > ~/.config/systemd/user/panoptic.service
 
 # Reload and start
 systemctl --user daemon-reload
-systemctl --user enable --now tmux-dash
+systemctl --user enable --now panoptic
 
 # Check status
-systemctl --user status tmux-dash
+systemctl --user status panoptic
 
 # View logs
-journalctl --user -u tmux-dash -f
+journalctl --user -u panoptic -f
 ```
 
 ### Log files
@@ -419,7 +419,7 @@ tail -f <install-dir>/logs/stderr.log
 **Linux (systemd):** Logs go to journald by default:
 
 ```bash
-journalctl --user -u tmux-dash -f
+journalctl --user -u panoptic -f
 ```
 
 ## Uninstall
@@ -435,8 +435,8 @@ This unloads the launchd service and removes the plist from `~/Library/LaunchAge
 **Linux:**
 
 ```bash
-systemctl --user disable --now tmux-dash
-rm ~/.config/systemd/user/tmux-dash.service
+systemctl --user disable --now panoptic
+rm ~/.config/systemd/user/panoptic.service
 systemctl --user daemon-reload
 ```
 

@@ -1,21 +1,21 @@
 {
-  "name": "tmux-dash",
-  "short_name": "tmux-dash",
+  "name": "panoptic",
+  "short_name": "panoptic",
   "description": "Browser-based tmux session monitor and terminal interface",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
-  "background_color": "#141418",
-  "theme_color": "#141418",
+  "background_color": "hsl(217, 51%, 14%)",
+  "theme_color": "hsl(217, 51%, 14%)",
   "icons": [
     {
-      "src": "/static/icon.svg",
+      "src": "/static/icon-dark.svg",
       "sizes": "any",
       "type": "image/svg+xml",
       "purpose": "any"
     },
     {
-      "src": "/static/icon-maskable.svg",
+      "src": "/static/icon-light.svg",
       "sizes": "any",
       "type": "image/svg+xml",
       "purpose": "maskable"

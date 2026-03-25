@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""tmux-dash CLI — the canonical way to start the dashboard server.
+"""panoptic CLI — the canonical way to start the dashboard server.
 
 Usage::
 
-    python3 tmux_dash_cli.py serve                # default settings
-    python3 tmux_dash_cli.py serve --headless      # loopback-only + SSH instructions
-    python3 tmux_dash_cli.py serve --port 8080     # custom port
+    python3 panoptic_cli.py serve                # default settings
+    python3 panoptic_cli.py serve --headless      # loopback-only + SSH instructions
+    python3 panoptic_cli.py serve --port 8080     # custom port
 
-See ``python3 tmux_dash_cli.py serve --help`` for all flags.
+See ``python3 panoptic_cli.py serve --help`` for all flags.
 """
 
 from __future__ import annotations
@@ -27,10 +27,10 @@ def _build_serve_parser(subparsers: argparse._SubParsersAction) -> None:
 
     p = subparsers.add_parser(
         "serve",
-        help="Start the tmux-dash server",
+        help="Start the panoptic server",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=textwrap.dedent("""\
-            Start the tmux-dash dashboard server.
+            Start the panoptic dashboard server.
 
             By default the server binds to {host}:{port} and serves the
             dashboard over HTTP (or HTTPS when TLS is configured).
@@ -252,7 +252,7 @@ def _print_headless_instructions(settings: RuntimeSettings) -> None:
 
     print()
     print("=" * 60)
-    print("  tmux-dash running in HEADLESS mode")
+    print("  panoptic running in HEADLESS mode")
     print("=" * 60)
     print()
     print(f"  Dashboard bound to 127.0.0.1:{settings.port} (loopback only)")
@@ -285,8 +285,8 @@ def _cmd_serve(args: argparse.Namespace) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        prog="tmux-dash",
-        description="tmux-dash — browser-based tmux session monitor and terminal",
+        prog="panoptic",
+        description="panoptic — browser-based tmux session monitor and terminal",
     )
     subparsers = parser.add_subparsers(dest="command")
     _build_serve_parser(subparsers)

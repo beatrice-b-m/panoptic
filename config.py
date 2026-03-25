@@ -1,4 +1,4 @@
-"""Configuration constants for tmux-dash."""
+"""Configuration constants for panoptic."""
 
 import os
 from dataclasses import dataclass

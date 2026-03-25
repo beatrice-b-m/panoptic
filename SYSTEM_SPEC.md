@@ -1,6 +1,6 @@
 # System Specification: tmux Web Dashboard
 
-**Project:** `tmux-dash` — Browser-based tmux session monitor and terminal interface  
+**Project:** `panoptic` — Browser-based tmux session monitor and terminal interface  
 **Target platform:** macOS (Mac Mini, Apple Silicon or Intel)  
 **Access method:** Tailscale private network  
 **Primary use case:** Monitoring and interacting with Oh-My-Pi (OMP) agentic coding agent sessions
@@ -9,7 +9,7 @@
 
 ## 1. Overview
 
-`tmux-dash` is a persistent local web server running on a Mac Mini that exposes all active tmux sessions as interactive browser terminals. It provides a session-picker dashboard and full terminal interaction (keyboard and mouse) for multi-pane tmux sessions. It is designed to be always-on, resource-efficient when idle, and accessible exclusively over a Tailscale private network.
+`panoptic` is a persistent local web server running on a Mac Mini that exposes all active tmux sessions as interactive browser terminals. It provides a session-picker dashboard and full terminal interaction (keyboard and mouse) for multi-pane tmux sessions. It is designed to be always-on, resource-efficient when idle, and accessible exclusively over a Tailscale private network.
 
 ---
 
@@ -40,7 +40,7 @@
 
 ```
 Mac Mini
-├── tmux-dash server (Python, port 7680)
+├── panoptic server (Python, port 7680)
 │   ├── Dashboard HTTP endpoint    GET /
 │   ├── Session API endpoint       GET /api/sessions
 │   ├── WebSocket terminal proxy   WS  /ws/{session_name}/{pane_id}
@@ -51,7 +51,7 @@ Mac Mini
 
 ### 3.2 Process Roles
 
-**tmux-dash server** (always running, `launchd`-managed):
+**panoptic server** (always running, `launchd`-managed):
 
 - Serves the dashboard HTML/JS frontend
 - Maintains a session registry by polling `tmux ls` on a configurable interval
@@ -59,7 +59,7 @@ Mac Mini
 - Tears down `ttyd` processes when sessions disappear
 - Idles gracefully: polling slows to a long interval (~30s) when no WebSocket clients are connected
 
-**ttyd processes** (one per session, managed by tmux-dash):
+**ttyd processes** (one per session, managed by panoptic):
 
 - Each instance attaches to a specific tmux session: `ttyd tmux attach -t {session_name}`
 - Bound to `127.0.0.1` only (not exposed directly; proxied by the dashboard server or accessed via port)
@@ -325,7 +325,7 @@ Server stops (SIGTERM/SIGINT)
 
 ### 7.4 launchd Configuration
 
-**Plist location:** `~/Library/LaunchAgents/com.user.tmux-dash.plist`
+**Plist location:** `~/Library/LaunchAgents/com.user.panoptic.plist`
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -333,22 +333,22 @@ Server stops (SIGTERM/SIGINT)
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.user.tmux-dash</string>
+    <string>com.user.panoptic</string>
     <key>ProgramArguments</key>
     <array>
         <string>/usr/bin/python3</string>
-        <string>/path/to/tmux-dash/server.py</string>
+        <string>/path/to/panoptic/server.py</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>/path/to/tmux-dash/logs/stdout.log</string>
+    <string>/path/to/panoptic/logs/stdout.log</string>
     <key>StandardErrorPath</key>
-    <string>/path/to/tmux-dash/logs/stderr.log</string>
+    <string>/path/to/panoptic/logs/stderr.log</string>
     <key>WorkingDirectory</key>
-    <string>/path/to/tmux-dash</string>
+    <string>/path/to/panoptic</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
@@ -364,16 +364,16 @@ Server stops (SIGTERM/SIGINT)
 
 ```bash
 # Load and start
-launchctl load ~/Library/LaunchAgents/com.user.tmux-dash.plist
+launchctl load ~/Library/LaunchAgents/com.user.panoptic.plist
 
 # Stop and unload
-launchctl unload ~/Library/LaunchAgents/com.user.tmux-dash.plist
+launchctl unload ~/Library/LaunchAgents/com.user.panoptic.plist
 
 # Check status
-launchctl list | grep tmux-dash
+launchctl list | grep panoptic
 
 # View logs
-tail -f /path/to/tmux-dash/logs/stdout.log
+tail -f /path/to/panoptic/logs/stdout.log
 ```
 
 ---
@@ -432,7 +432,7 @@ The following measures keep resource usage low when the dashboard has no active 
 ## 10. Project File Structure
 
 ```
-tmux-dash/
+panoptic/
 ├── server.py              # Main aiohttp/FastAPI server
 ├── session_manager.py     # tmux session discovery + ttyd lifecycle
 ├── config.py              # Configuration constants
@@ -445,8 +445,8 @@ tmux-dash/
 ├── logs/
 │   ├── stdout.log
 │   └── stderr.log
-├── com.user.tmux-dash.plist  # launchd plist template
-├── setup-service.sh       # Sets up tmux-dash as a background launchd service
+├── com.user.panoptic.plist  # launchd plist template
+├── setup-service.sh       # Sets up panoptic as a background launchd service
 └── README.md
 ```
 
@@ -494,7 +494,7 @@ TEMPLATES_CONFIG_PATH = "templates.json"  # path to template store
 4. **`static/style.css`** — dark terminal theme
 5. **`static/index.html`** — dashboard shell, session card template
 6. **`static/app.js`** — fetch-based session list, polling, pane layout renderer, iframe management
-7. **`com.user.tmux-dash.plist`** — launchd plist with correct paths
+7. **`com.user.panoptic.plist`** — launchd plist with correct paths
 8. **`setup-service.sh`** — brew install ttyd, pip install deps, register and start launchd service
 9. **`README.md`** — setup instructions, tailscale access guide
 

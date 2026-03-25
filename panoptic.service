@@ -1,15 +1,15 @@
 [Unit]
-Description=tmux-dash session monitor
+Description=panoptic session monitor
 After=network.target
 
 [Service]
 Type=simple
 WorkingDirectory=__INSTALL_DIR__
-ExecStart=/usr/bin/python3 tmux_dash_cli.py serve
+ExecStart=/usr/bin/python3 panoptic_cli.py serve
 Restart=on-failure
 RestartSec=5
 
-# Logging goes to journald by default; use journalctl -u tmux-dash to view.
+# Logging goes to journald by default; use journalctl -u panoptic to view.
 # Optionally redirect to files like the launchd configuration:
 # StandardOutput=append:__INSTALL_DIR__/logs/stdout.log
 # StandardError=append:__INSTALL_DIR__/logs/stderr.log

@@ -3,14 +3,14 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="theme-color" content="#141418" media="(prefers-color-scheme: dark)">
-    <meta name="theme-color" content="#f0f0f5" media="(prefers-color-scheme: light)">
+    <meta name="theme-color" content="hsl(217, 51%, 14%)" media="(prefers-color-scheme: dark)">
+    <meta name="theme-color" content="hsl(20, 10%, 97%)" media="(prefers-color-scheme: light)">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    <title>tmux-dash</title>
+    <title>panoptic</title>
     <link rel="manifest" href="/manifest.json">
-    <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
-    <link rel="apple-touch-icon" href="/static/icon.svg">
+    <link rel="icon" href="/static/icon-dark.svg" type="image/svg+xml">
+    <link rel="apple-touch-icon" href="/static/icon-dark.svg">
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -21,7 +21,7 @@
     <!-- Dashboard view (session list) -->
     <div id="dashboard-view">
         <header class="header">
-            <h1 class="header-title">tmux<span>-dash</span></h1>
+            <h1 class="header-title"><img id="header-icon" src="/static/icon-dark.svg" alt="" class="header-icon">panoptic</h1>
             <div class="header-spacer"></div>
             <span id="last-refreshed" class="last-refreshed">&mdash;</span>
             <span id="refresh-spinner" class="refresh-spinner hidden"></span>
@@ -183,7 +183,7 @@
                     <div class="form-hint">
                         The host alias from your <code>~/.ssh/config</code>. All authentication
                         (keys, agent, ProxyJump, etc.) is handled by OpenSSH &mdash;
-                        tmux-dash never stores passwords or private keys.
+                        panoptic never stores passwords or private keys.
                     </div>
                 </div>
                 <div id="add-host-error" class="form-error hidden"></div>

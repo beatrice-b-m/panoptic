@@ -1,14 +1,15 @@
-// tmux-dash service worker — app-shell caching with network-first API.
+// panoptic service worker — app-shell caching with network-first API.
 // Bump CACHE_VERSION to invalidate all cached assets on the next load.
-const CACHE_VERSION = 1;
-const CACHE_NAME = `tmux-dash-v${CACHE_VERSION}`;
+const CACHE_VERSION = 2;
+const CACHE_NAME = `panoptic-v${CACHE_VERSION}`;
 
 const APP_SHELL = [
   "/",
   "/static/style.css",
   "/static/app.js",
   "/static/manifest.json",
-  "/static/icon.svg",
+  "/static/icon-dark.svg",
+  "/static/icon-light.svg",
 ];
 
 // ── Install: pre-cache app shell ────────────────────────────────────────────
@@ -28,7 +29,7 @@ self.addEventListener("activate", (event) => {
     caches.keys().then((keys) =>
       Promise.all(
         keys
-          .filter((k) => k.startsWith("tmux-dash-") && k !== CACHE_NAME)
+          .filter((k) => k.startsWith("panoptic-") && k !== CACHE_NAME)
           .map((k) => caches.delete(k))
       )
     )
@@ -72,7 +73,7 @@ self.addEventListener("fetch", (event) => {
             // Network failed — cached version (if any) was already returned.
             // If there's no cache either, return a basic offline indicator.
             if (!cached) {
-              return new Response("Offline — tmux-dash is unavailable.", {
+              return new Response("Offline — panoptic is unavailable.", {
                 status: 503,
                 headers: { "Content-Type": "text/plain" },
               });

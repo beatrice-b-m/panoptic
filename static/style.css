@@ -1,39 +1,39 @@
-/* tmux-dash — dual-theme design system
+/* panoptic — dual-theme design system
    Adapted from smart-home-interface reference app. */
 
 /* ─── Design tokens (dark — default) ──────────────────────────────────────── */
 
 :root {
     /* Backgrounds */
-    --bg-base: #141418;
-    --bg-surface: #1c1c24;
-    --bg-elevated: #24242e;
-    --bg-inset: #12121a;
-    --bg-hover: #2a2a36;
+    --bg-base: hsl(217, 51%, 14%);
+    --bg-surface: hsl(217, 40%, 18%);
+    --bg-elevated: hsl(217, 35%, 23%);
+    --bg-inset: hsl(217, 55%, 11%);
+    --bg-hover: hsl(217, 30%, 27%);
 
     /* Borders */
-    --border-default: #2e2e3a;
-    --border-subtle: #252530;
-    --border-accent: #4fc3f744;
+    --border-default: hsl(217, 25%, 28%);
+    --border-subtle: hsl(217, 30%, 22%);
+    --border-accent: hsla(6, 98%, 72%, 0.25);
 
     /* Text */
-    --text-primary: #e8e8ee;
-    --text-secondary: #9898a8;
-    --text-tertiary: #606070;
-    --text-inverse: #141418;
+    --text-primary: hsl(215, 20%, 92%);
+    --text-secondary: hsl(215, 12%, 62%);
+    --text-tertiary: hsl(215, 10%, 42%);
+    --text-inverse: hsl(217, 51%, 14%);
 
-    /* Accent (cyan) */
-    --accent: #4fc3f7;
-    --accent-hover: #81d4fa;
-    --accent-muted: #4fc3f722;
+    /* Accent (coral) */
+    --accent: hsl(6, 98%, 72%);
+    --accent-hover: hsl(6, 90%, 78%);
+    --accent-muted: hsla(6, 98%, 72%, 0.14);
 
     /* Status */
-    --status-on: #4caf50;
-    --status-on-glow: #4caf5066;
-    --status-warning: #d4882b;
-    --status-warning-bg: #3d2e00;
-    --status-warning-border: #b8860b;
-    --status-warning-text: #ffd54f;
+    --status-on: hsl(159, 34%, 46%);
+    --status-on-glow: hsla(159, 34%, 46%, 0.4);
+    --status-warning: hsl(30, 100%, 68%);
+    --status-warning-bg: hsl(30, 50%, 15%);
+    --status-warning-border: hsl(30, 95%, 61%);
+    --status-warning-text: hsl(30, 100%, 78%);
 
     /* Shadows */
     --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.24);
@@ -66,31 +66,31 @@
 /* ─── Design tokens (light) ───────────────────────────────────────────────── */
 
 [data-theme="light"] {
-    --bg-base: #f2f2f6;
-    --bg-surface: #ffffff;
-    --bg-elevated: #eaeaf0;
-    --bg-inset: #e4e4ec;
-    --bg-hover: #dddde6;
+    --bg-base: hsl(20, 10%, 97%);
+    --bg-surface: hsl(0, 0%, 100%);
+    --bg-elevated: hsl(20, 8%, 94%);
+    --bg-inset: hsl(20, 6%, 91%);
+    --bg-hover: hsl(20, 5%, 90%);
 
-    --border-default: #d0d0da;
-    --border-subtle: #e0e0e8;
-    --border-accent: #0d8ecf44;
+    --border-default: hsl(20, 5%, 83%);
+    --border-subtle: hsl(20, 5%, 89%);
+    --border-accent: hsla(21, 95%, 55%, 0.25);
 
-    --text-primary: #1a1a2e;
-    --text-secondary: #55556a;
-    --text-tertiary: #8888a0;
-    --text-inverse: #ffffff;
+    --text-primary: hsl(217, 35%, 18%);
+    --text-secondary: hsl(217, 15%, 45%);
+    --text-tertiary: hsl(217, 10%, 62%);
+    --text-inverse: hsl(0, 0%, 100%);
 
-    --accent: #0d8ecf;
-    --accent-hover: #0a7ab8;
-    --accent-muted: #0d8ecf1a;
+    --accent: hsl(21, 95%, 55%);
+    --accent-hover: hsl(21, 95%, 48%);
+    --accent-muted: hsla(21, 95%, 55%, 0.12);
 
-    --status-on: #2e7d32;
-    --status-on-glow: #4caf5044;
-    --status-warning: #e67e22;
-    --status-warning-bg: #fff3e0;
-    --status-warning-border: #ffb74d;
-    --status-warning-text: #bf360c;
+    --status-on: hsl(159, 40%, 38%);
+    --status-on-glow: hsla(159, 40%, 38%, 0.35);
+    --status-warning: hsl(44, 88%, 50%);
+    --status-warning-bg: hsl(44, 80%, 93%);
+    --status-warning-border: hsl(44, 88%, 50%);
+    --status-warning-text: hsl(44, 80%, 22%);
 
     --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.06);
     --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.10);
@@ -157,10 +157,15 @@ button {
     color: var(--text-primary);
     letter-spacing: 0.04em;
     margin: 0;
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
 }
 
-.header-title span {
-    color: var(--accent);
+.header-icon {
+    width: 1.4rem;
+    height: 1.4rem;
+    flex-shrink: 0;
 }
 
 .session-count-badge {

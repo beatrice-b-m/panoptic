@@ -1,4 +1,4 @@
-// tmux-dash frontend — vanilla JS, no frameworks
+// panoptic frontend — vanilla JS, no frameworks
 // All DOM IDs must match index.html exactly.
 
 let currentHostId = 'localhost';  // active host tab
@@ -64,7 +64,13 @@ function applyTheme(theme) {
     // Keep the PWA theme-color in sync so the browser chrome matches.
     const metaTheme = document.querySelector('meta[name="theme-color"]:not([media])') ||
                       document.querySelector('meta[name="theme-color"]');
-    if (metaTheme) metaTheme.content = theme === 'dark' ? '#141418' : '#f0f0f5';
+    if (metaTheme) metaTheme.content = theme === 'dark' ? 'hsl(217, 51%, 14%)' : 'hsl(20, 10%, 97%)';
+    // Swap favicon and header icon to match active theme.
+    const iconSrc = theme === 'dark' ? '/static/icon-dark.svg' : '/static/icon-light.svg';
+    const favicon = document.querySelector('link[rel="icon"]');
+    if (favicon) favicon.href = iconSrc;
+    const headerIcon = document.getElementById('header-icon');
+    if (headerIcon) headerIcon.src = iconSrc;
 }
 
 function toggleTheme() {

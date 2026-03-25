@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-`tmux-dash` is a browser-based tmux session monitor and terminal interface. It runs as a persistent local web server, discovers active tmux sessions, and exposes them as interactive terminals in the browser via [ttyd](https://github.com/tsl0922/ttyd). Designed as a single-user personal tool accessed exclusively over a Tailscale private network.
+`panoptic` is a browser-based tmux session monitor and terminal interface. It runs as a persistent local web server, discovers active tmux sessions, and exposes them as interactive terminals in the browser via [ttyd](https://github.com/tsl0922/ttyd). Designed as a single-user personal tool accessed exclusively over a Tailscale private network.
 
 **Primary use case:** Monitoring and interacting with Oh-My-Pi (OMP) agentic coding agent sessions from a remote browser.
 
@@ -15,7 +15,7 @@ Two process types cooperate:
 ```
 Browser (Tailscale client)
   │
-  ├─► tmux-dash server (Python, port 7680)
+  ├─► panoptic server (Python, port 7680)
   │     ├── GET /                        → Dashboard HTML (SPA)
   │     ├── GET /api/sessions            → Session list JSON (paginated)
   │     ├── GET /api/sessions/{name}/panes → Pane layout JSON
@@ -38,7 +38,7 @@ No WebSocket proxying — browser connects to ttyd ports directly over Tailscale
 ## Key Directories
 
 ```
-tmux-dash/
+panoptic/
 ├── server.py              # Main aiohttp server: routes, static serving, client tracking
 ├── session_manager.py     # tmux polling, ttyd spawn/kill, port pool management
 ├── config.py              # All configuration constants (ports, intervals, paths)
@@ -47,9 +47,9 @@ tmux-dash/
 │   ├── app.js             # Vanilla JS: fetch, polling, pane layout, iframe management
 │   └── style.css          # Dark terminal theme (no frameworks)
 ├── logs/                  # stdout.log, stderr.log (launchd-managed)
-├── com.user.tmux-dash.plist  # launchd plist template (macOS)
-├── tmux-dash.service          # systemd unit template (Linux)
-├── setup-service.sh       # Sets up tmux-dash as a background launchd service
+├── com.user.panoptic.plist  # launchd plist template (macOS)
+├── panoptic.service          # systemd unit template (Linux)
+├── setup-service.sh       # Sets up panoptic as a background launchd service
 ├── SYSTEM_SPEC.md         # Authoritative design document
 ├── .env                   # Environment overrides (gitignored)
 └── .env.example           # Template for .env
@@ -64,9 +64,9 @@ tmux-dash/
 | `session_manager.py` | Core logic: tmux discovery, ttyd lifecycle, port pool |
 | `server.py` | HTTP server wiring: REST endpoints, static files, idle/active mode |
 | `static/app.js` | Frontend logic: session list, pane renderer, iframe embedding |
-| `com.user.tmux-dash.plist` | macOS launchd service definition |
-| `tmux-dash.service` | Linux systemd user unit definition |
-| `setup-service.sh` | Registers tmux-dash as a persistent background service (macOS) |
+| `com.user.panoptic.plist` | macOS launchd service definition |
+| `panoptic.service` | Linux systemd user unit definition |
+| `setup-service.sh` | Registers panoptic as a persistent background service (macOS) |
 
 ## Runtime & Tooling
 
@@ -157,9 +157,9 @@ curl -s http://localhost:7680/api/health
 curl -s http://localhost:7680/api/sessions | python3 -m json.tool
 
 # launchd management
-launchctl load ~/Library/LaunchAgents/com.user.tmux-dash.plist
-launchctl unload ~/Library/LaunchAgents/com.user.tmux-dash.plist
-launchctl list | grep tmux-dash
+launchctl load ~/Library/LaunchAgents/com.user.panoptic.plist
+launchctl unload ~/Library/LaunchAgents/com.user.panoptic.plist
+launchctl list | grep panoptic
 ```
 
 ## Version Control

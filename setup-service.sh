@@ -2,10 +2,10 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PLIST_NAME="com.user.tmux-dash.plist"
+PLIST_NAME="com.user.panoptic.plist"
 PLIST_SRC="$SCRIPT_DIR/$PLIST_NAME"
 PLIST_DEST="$HOME/Library/LaunchAgents/$PLIST_NAME"
-LABEL="com.user.tmux-dash"
+LABEL="com.user.panoptic"
 DASHBOARD_PORT=7680
 
 # ── helpers ─────────────────────────────────────────────────────────────────
@@ -17,7 +17,7 @@ error() { echo "[error] $*" >&2; exit 1; }
 # ── uninstall ────────────────────────────────────────────────────────────────
 
 if [[ "${1:-}" == "--uninstall" ]]; then
-    info "Uninstalling tmux-dash..."
+    info "Uninstalling panoptic..."
 
     if launchctl list | grep -q "$LABEL" 2>/dev/null; then
         launchctl unload "$PLIST_DEST" 2>/dev/null && info "Service stopped." || warn "Could not unload service (may already be stopped)."
@@ -33,7 +33,7 @@ if [[ "${1:-}" == "--uninstall" ]]; then
     fi
 
     echo ""
-    echo "tmux-dash uninstalled."
+    echo "panoptic uninstalled."
     exit 0
 fi
 
@@ -111,7 +111,7 @@ info "Service loaded."
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo " tmux-dash service installed"
+echo " panoptic service installed"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo " Install dir : $SCRIPT_DIR"
 echo " Plist       : $PLIST_DEST"
@@ -121,8 +121,8 @@ echo " The server is now running as a background"
 echo " service via launchd. It starts on boot and"
 echo " restarts automatically on crash."
 echo ""
-echo " Status      : launchctl list | grep tmux-dash"
-echo " Start       : python3 $SCRIPT_DIR/tmux_dash_cli.py serve"
+echo " Status      : launchctl list | grep panoptic"
+echo " Start       : python3 $SCRIPT_DIR/panoptic_cli.py serve"
 echo " Logs        : tail -f $SCRIPT_DIR/logs/stderr.log"
 echo " Uninstall   : $SCRIPT_DIR/setup-service.sh --uninstall"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""tmux-dash server: HTTP API + static file serving + session lifecycle.
+"""panoptic server: HTTP API + static file serving + session lifecycle.
 
 When TLS_CERT and TLS_KEY point to valid files (e.g. from ``tailscale cert``),
 the server terminates TLS directly.  All ttyd terminal traffic is reverse-
@@ -794,7 +794,7 @@ async def on_startup(app: web.Application) -> None:
     scheme = "https" if app.get("_tls_enabled") else "http"
     total = mgr.total_session_count()
     log.info(
-        "tmux-dash started on %s://%s:%d — %d session(s) discovered across %d host(s)",
+        "panoptic started on %s://%s:%d — %d session(s) discovered across %d host(s)",
         scheme,
         settings.host,
         settings.port,
@@ -819,7 +819,7 @@ async def on_cleanup(app: web.Application) -> None:
             await poll_task
         except asyncio.CancelledError:
             pass
-    log.info("tmux-dash shut down cleanly")
+    log.info("panoptic shut down cleanly")
 
 
 def build_app(settings: RuntimeSettings) -> web.Application:

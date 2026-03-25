@@ -3,12 +3,12 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.user.tmux-dash</string>
+    <string>com.user.panoptic</string>
 
     <key>ProgramArguments</key>
     <array>
         <string>/usr/bin/python3</string>
-        <string>tmux_dash_cli.py</string>
+        <string>panoptic_cli.py</string>
         <string>serve</string>
     </array>
 

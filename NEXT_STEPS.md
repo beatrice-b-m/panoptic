@@ -1,12 +1,12 @@
 # Next Steps
 
-Roadmap for evolving tmux-dash from a single-host session monitor into an extensible agent coordination platform.
+Roadmap for evolving panoptic from a single-host session monitor into an extensible agent coordination platform.
 
 ---
 
 ## 1. Extensible Core Architecture
 
-The overarching goal: build tmux-dash as a lean core, then layer agent coordination and monitoring on top as extensions rather than embedding that logic directly into the core system.
+The overarching goal: build panoptic as a lean core, then layer agent coordination and monitoring on top as extensions rather than embedding that logic directly into the core system.
 
 - Define a plugin/extension interface that external modules can hook into.
 - Keep session discovery, ttyd lifecycle, and the REST API as core concerns.
@@ -155,7 +155,7 @@ Expose a backend API that allows external callers to communicate with running se
 4. (Optional) Add `POST /api/sessions/{name}/panes/{index}/wait` for automation.
 
 **Risks:**
-- The send-keys endpoint makes tmux-dash an authenticated remote command execution proxy. If item 7 (auth) is deferred, this is only safe under the current Tailscale-only access model.
+- The send-keys endpoint makes panoptic an authenticated remote command execution proxy. If item 7 (auth) is deferred, this is only safe under the current Tailscale-only access model.
 - Pane index addressing assumes a single window. Multi-window sessions would need `{window}.{pane}` addressing. The current codebase only models single-window sessions — extending to multi-window is a separate scope expansion.
 
 **Recommendation:** High-value for the OMP coordination use case. Items 1-3 above are quick wins (a few hours each). The wait-for-content primitive (#4) is what makes the API genuinely useful for automation rather than fire-and-forget.
@@ -242,7 +242,7 @@ This is a longer-term goal that builds on the other work being stable first.
 
 **Revised effort rating: depends entirely on approach chosen (see below)**
 
-My initial evaluation of this item was too pessimistic in some areas and missed a viable alternative that doesn't require Tauri at all. The key insight is architectural: since tmux-dash already reverse-proxies ttyd through `/terminal/{name}/`, the parent page and the ttyd iframe are **same-origin**. This means the dashboard's JavaScript can reach into the iframe and call `window.term.input()` on ttyd's exposed xterm.js instance to inject keystrokes programmatically. This changes the design space significantly.
+My initial evaluation of this item was too pessimistic in some areas and missed a viable alternative that doesn't require Tauri at all. The key insight is architectural: since panoptic already reverse-proxies ttyd through `/terminal/{name}/`, the parent page and the ttyd iframe are **same-origin**. This means the dashboard's JavaScript can reach into the iframe and call `window.term.input()` on ttyd's exposed xterm.js instance to inject keystrokes programmatically. This changes the design space significantly.
 
 #### The actual problem
 
@@ -353,20 +353,20 @@ The entire codebase assumes localhost. This is not a superficial assumption — 
 
 - **SessionManager** calls `tmux list-sessions` as a local subprocess. Remote discovery requires SSH command execution: `ssh user@host tmux list-sessions`. Every `_run_tmux()` call would need to route through either a local or SSH subprocess depending on the host.
 - **ttyd processes** are spawned locally and bind to local ports. For remote sessions, you cannot spawn ttyd on the local machine for a remote tmux session. Instead, you need ttyd running on the *remote* host, or you need to proxy the terminal connection over SSH.
-- **The port pool** (`7681-7699`) is a local resource. Remote hosts need their own port management — either managed remotely (tmux-dash SSHs in and spawns ttyd on the remote host) or proxied through the dashboard server (SSH tunnels).
+- **The port pool** (`7681-7699`) is a local resource. Remote hosts need their own port management — either managed remotely (panoptic SSHs in and spawns ttyd on the remote host) or proxied through the dashboard server (SSH tunnels).
 - **Pane content capture** (`tmux capture-pane`) runs locally. Remote capture needs SSH.
 - **Session creation** (`tmux new-session`) is local. Remote creation needs SSH.
 
 **Two architectural approaches:**
 
 **(A) SSH tunnel approach — remote ttyd:**
-- tmux-dash SSHs into each remote host and spawns ttyd there (or discovers already-running ttyd instances).
+- panoptic SSHs into each remote host and spawns ttyd there (or discovers already-running ttyd instances).
 - Browser connects to remote ttyd ports via SSH tunnel or direct Tailscale access to the remote host.
 - Pros: Each host is self-contained; ttyd runs next to tmux (low latency).
 - Cons: Requires ttyd installed on every remote host. Port management on remote hosts. Firewall/Tailscale configuration per host.
 
 **(B) SSH proxy approach — local ttyd:**
-- tmux-dash spawns local ttyd instances that run `ssh -t user@host tmux attach -t {session}` instead of `tmux attach -t {session}`.
+- panoptic spawns local ttyd instances that run `ssh -t user@host tmux attach -t {session}` instead of `tmux attach -t {session}`.
 - All ttyd processes are local; SSH handles the remote terminal connection.
 - Pros: Only the dashboard host needs ttyd. No port management on remote hosts.
 - Cons: Every keystroke goes through an SSH hop. Latency is additive. SSH connection stability becomes critical.
@@ -389,7 +389,7 @@ The entire codebase assumes localhost. This is not a superficial assumption — 
 
 4. **Frontend: host selector / multi-gallery.** The dashboard needs a top-level host picker or tabbed view. Each host has its own session grid. The URL structure changes from `/?session=name` to `/?host=pi&session=name`. The session card and terminal view code needs host context threaded through.
 
-5. **ttyd lifecycle for remote sessions.** For approach (B), ttyd spawning changes from `ttyd ... tmux attach -t {name}` to `ttyd ... ssh -t user@host tmux attach -t {name}`. For approach (A), tmux-dash needs to SSH into the remote host, spawn ttyd there, and track remote PIDs — significantly more complex.
+5. **ttyd lifecycle for remote sessions.** For approach (B), ttyd spawning changes from `ttyd ... tmux attach -t {name}` to `ttyd ... ssh -t user@host tmux attach -t {name}`. For approach (A), panoptic needs to SSH into the remote host, spawn ttyd there, and track remote PIDs — significantly more complex.
 
 6. **Health checking and reconnection.** SSH connections fail. The system needs to handle: SSH auth failures, network timeouts, connection drops, host unreachable. Each needs a distinct UI state and recovery strategy.
 
@@ -454,7 +454,7 @@ Remote host support makes security a first-class concern. Currently, network sec
    - `_capture_pane` output is rendered into SVG with `html.escape()` — safe.
 
 **Implementation sequence:**
-1. Add API key middleware (opt-in via env var `TMUX_DASH_API_KEY`).
+1. Add API key middleware (opt-in via env var `PANOPTIC_API_KEY`).
 2. Add login page/modal to frontend.
 3. Review `list_directories` path restriction.
 4. Review reverse proxy session name handling.
@@ -509,7 +509,7 @@ def _env_int(key: str, default: int) -> int:
     except ValueError:
         return default
 
-DASHBOARD_PORT = _env_int("TMUX_DASH_PORT", 7680)
+DASHBOARD_PORT = _env_int("PANOPTIC_PORT", 7680)
 ```
 
 Then update `.env.example` to document all available variables.
@@ -528,7 +528,7 @@ Introduce a persistent configuration file (e.g., `settings.json`) for values tha
 
 **What needs to be built:**
 
-1. **Settings file format and location.** JSON is the pragmatic choice — Python's `json` module is in the standard library, no dependency needed. YAML would require `pyyaml`. TOML is an option (stdlib in Python 3.11+) but less natural for deeply nested structures like host definitions. File location: `settings.json` in the project root, or `~/.config/tmux-dash/settings.json` for XDG compliance.
+1. **Settings file format and location.** JSON is the pragmatic choice — Python's `json` module is in the standard library, no dependency needed. YAML would require `pyyaml`. TOML is an option (stdlib in Python 3.11+) but less natural for deeply nested structures like host definitions. File location: `settings.json` in the project root, or `~/.config/panoptic/settings.json` for XDG compliance.
 
 2. **Settings loader module.** A `settings.py` module that: (a) loads the JSON file at startup, (b) validates the structure against a schema (or at minimum, provides typed accessor methods), (c) provides a `reload()` method for live updates, (d) provides a `save()` method for UI-driven changes (item 8c). The initial version can be ~50-80 lines.
 
