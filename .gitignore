@@ -10,4 +10,5 @@ __pycache__/
 
 # Config data (user-specific)
 hosts.json
-templates.json.ttyd.pids
+templates.json
+.ttyd.pids
