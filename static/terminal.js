@@ -11,11 +11,11 @@
  *   First client message after open: JSON { AuthToken, columns, rows }
  */
 
-import { Terminal }       from '/static/vendor/xterm/xterm.mjs';
-import { FitAddon }       from '/static/vendor/xterm/addon-fit.mjs';
-import { ClipboardAddon } from '/static/vendor/xterm/addon-clipboard.mjs';
-import { WebglAddon }     from '/static/vendor/xterm/addon-webgl.mjs';
-import { WebLinksAddon }  from '/static/vendor/xterm/addon-web-links.mjs';
+import { Terminal }                        from '/static/vendor/xterm/xterm.mjs';
+import { FitAddon }                        from '/static/vendor/xterm/addon-fit.mjs';
+import { ClipboardAddon, Base64 }          from '/static/vendor/xterm/addon-clipboard.mjs';
+import { WebglAddon }                      from '/static/vendor/xterm/addon-webgl.mjs';
+import { WebLinksAddon }                   from '/static/vendor/xterm/addon-web-links.mjs';
 
 // ---------------------------------------------------------------------------
 // ttyd command bytes (ASCII character codes)
@@ -31,6 +31,48 @@ const CMD = {
     PAUSE:      '2',
     RESUME:     '3',
 };
+
+// ---------------------------------------------------------------------------
+// Clipboard helper — works on insecure HTTP contexts (Tailscale, LAN).
+// navigator.clipboard.writeText() requires a Secure Context (HTTPS or
+// localhost).  Over plain HTTP on a non-localhost host, it rejects silently.
+// The fallback creates a hidden textarea, selects it, and uses the legacy
+// document.execCommand('copy') which only needs user activation + DOM
+// selection — both of which we have when responding to a mouse event.
+// ---------------------------------------------------------------------------
+
+/**
+ * Write `text` to the system clipboard.  Tries the modern async API first,
+ * then falls back to execCommand for non-secure contexts.
+ * @param {string} text
+ * @returns {Promise<boolean>}  resolves true if copy likely succeeded
+ */
+function writeClipboard(text) {
+    // Secure context: modern Clipboard API is available.
+    if (window.isSecureContext && navigator.clipboard?.writeText) {
+        return navigator.clipboard.writeText(text)
+            .then(() => true)
+            .catch(() => execCommandCopy(text));
+    }
+    return Promise.resolve(execCommandCopy(text));
+}
+
+/**
+ * Legacy clipboard write via a temporary textarea + execCommand.
+ * Returns true if the browser reports success.
+ */
+function execCommandCopy(text) {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    // Must be visible to the layout engine (offscreen, but not display:none).
+    ta.style.cssText = 'position:fixed;left:-9999px;top:-9999px;opacity:0';
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch { /* swallow */ }
+    ta.remove();
+    return ok;
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -120,14 +162,34 @@ export class TerminalHandle {
             cursorBlink: true,
             scrollback:  5000,
             theme: {
-                background: '#000000',
+                background:        '#000000',
+                selectionBackground: 'rgba(68, 152, 255, 0.35)',
+                selectionForeground: '#ffffff',
             },
         });
         this._terminal = term;
 
-        const fitAddon  = new FitAddon();
-        const clipAddon = new ClipboardAddon();
+        const fitAddon   = new FitAddon();
         const linksAddon = new WebLinksAddon();
+
+        // Clipboard provider that works on both secure (HTTPS/localhost) and
+        // insecure (plain HTTP over Tailscale/LAN) contexts.  The default
+        // BrowserClipboardProvider uses navigator.clipboard exclusively, which
+        // rejects on insecure origins — so OSC 52 writes from tmux would fail.
+        const clipProvider = {
+            readText(sel) {
+                if (sel !== 'c') return Promise.resolve('');
+                if (window.isSecureContext && navigator.clipboard?.readText) {
+                    return navigator.clipboard.readText().catch(() => '');
+                }
+                return Promise.resolve('');
+            },
+            writeText(sel, text) {
+                if (sel !== 'c') return Promise.resolve();
+                return writeClipboard(text).then(() => {});
+            },
+        };
+        const clipAddon = new ClipboardAddon(new Base64(), clipProvider);
         this._fitAddon = fitAddon;
 
         term.loadAddon(fitAddon);
@@ -145,14 +207,13 @@ export class TerminalHandle {
 
         fitAddon.fit();
 
-        // 3. Copy-on-select: write selected text to clipboard automatically.
+        // 3. Copy-on-select: write selected text to clipboard.
+        //    Uses writeClipboard() which falls back to execCommand on
+        //    insecure (non-HTTPS) origins.
         term.onSelectionChange(() => {
             const sel = term.getSelection();
             if (!sel) return;
-            navigator.clipboard.writeText(sel).catch(() => {
-                // Fallback for non-secure contexts: use legacy execCommand.
-                try { document.execCommand('copy'); } catch { /* swallow */ }
-            });
+            writeClipboard(sel);
         });
 
         // 4. Observe container resize → refit terminal.
