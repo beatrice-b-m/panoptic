@@ -23,11 +23,12 @@
 - Full keyboard input and mouse support in terminal panes
 - Efficient resource usage when no client is connected
 - Safe for Tailscale-only access (no public internet exposure)
+- Session template management: save, load, rename, and delete templates with macro variable support
 
 ### Non-Goals
 
 - Authentication/TLS (Tailscale handles this)
-- Session creation or tmux configuration management
+- ~~Session creation or tmux configuration management~~ (session creation now implemented via templates)
 - Mobile-optimised layout (desktop browser is primary)
 - Multi-user simultaneous access (single-user personal tool)
 
@@ -182,6 +183,28 @@ Returns pane layout for a session.
 #### `GET /api/health`
 
 Returns server status and session count. Used for liveness checks.
+
+#### Template Management
+
+##### `GET /api/templates`
+Returns all templates with extracted macro variable names.
+
+##### `POST /api/templates`
+Create a new template. Body: `{template_name, name, directory, layout_type, layout_spec, pane_commands}`.
+Validates macro placeholders in all content fields.
+
+##### `PUT /api/templates/{template_name}`
+Update all content fields of an existing template.
+
+##### `PATCH /api/templates/{template_name}`
+Rename a template. Body: `{"new_name": "..."}`. Returns updated entry.
+
+##### `DELETE /api/templates/{template_name}`
+Delete a template by name.
+
+##### `POST /api/hosts/{host_id}/sessions/from-template`
+Create session by rendering a template. Body: `{template_name, variables: {var: value}, pane_commands?}`.
+All template variables must be provided with non-empty values.
 
 ### 5.2 WebSocket (via ttyd)
 
@@ -413,6 +436,8 @@ tmux-dash/
 ├── server.py              # Main aiohttp/FastAPI server
 ├── session_manager.py     # tmux session discovery + ttyd lifecycle
 ├── config.py              # Configuration constants
+├── template_store.py      # Template persistence (JSON-backed CRUD)
+├── template_macros.py     # Macro placeholder validation, extraction, rendering
 ├── static/
 │   ├── index.html         # Single-page dashboard
 │   ├── app.js             # Frontend logic (vanilla JS)
@@ -442,6 +467,7 @@ POLL_INTERVAL_IDLE = 30           # seconds, when no clients
 SESSION_PAGE_SIZE = 8
 TTYD_BINARY = "ttyd"              # or absolute path: /opt/homebrew/bin/ttyd
 LOG_LEVEL = "INFO"
+TEMPLATES_CONFIG_PATH = "templates.json"  # path to template store
 ```
 
 ---
@@ -478,7 +504,7 @@ LOG_LEVEL = "INFO"
 
 These are explicitly out of scope for the initial build but noted for future iteration:
 
-- **Session creation UI** — creating new `tmux new-session` from the browser
+- ~~**Session creation UI**~~ — implemented via template rendering (`POST /api/hosts/{host_id}/sessions/from-template`)
 - **Named session aliases** — friendly names mapped to tmux session names
 - **Read-only mode** — view-only access per session
 - **Notification badges** — detect OMP agent output/activity and highlight in session list

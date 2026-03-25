@@ -18,8 +18,12 @@ A lightweight web dashboard that discovers your tmux sessions and exposes each o
 - **Always-on via launchd** -- survives reboots; crashes restart automatically
 - **Remote access** -- use `--host 0.0.0.0` for network access; reach from any device on your Tailscale network
 - **Create sessions from UI** -- click "+New" to spawn a tmux session with optional working directory and pane layout
-- **Pane layout support** -- row or column layouts via colon-separated spec (e.g. `2:1:3`); live CSS grid preview before creation
+- **Pane layout support** -- row or column layouts via colon-separated spec (e.g. `2:1:3`); supports mixed command segments (e.g. `vim,jest:3`); live CSS grid preview before creation
 - **Directory autocompletion** -- server-side path completion when typing a working directory for new sessions (localhost only)
+- **Session templates** -- save, load, rename, and delete session templates with pre-configured name, directory, layout, and pane commands
+- **Macro variables** -- templates support `{var}` placeholders that are filled at launch time; all variables must be provided before creation
+- **Pane startup commands** -- assign shell commands to individual panes via the layout preview; commands run after session creation
+- **Mixed layout specs** -- layout spec now supports command segments (e.g. `vim,jest:3`) in addition to pure numeric specs
 
 ## Prerequisites
 
@@ -221,6 +225,7 @@ All tuneable constants live in `config.py`. Most can also be set via environment
 | `TLS_CERT` | *(empty)* | `TLS_CERT` | Path to TLS certificate file (PEM) |
 | `TLS_KEY` | *(empty)* | `TLS_KEY` | Path to TLS private key file (PEM) |
 | `HOSTS_CONFIG_PATH` | `hosts.json` | `HOSTS_CONFIG_PATH` | Path to JSON host configuration file |
+| `TEMPLATES_CONFIG_PATH` | `templates.json` | `TEMPLATES_CONFIG_PATH` | Path to JSON template configuration file |
 | `SSH_CONNECT_TIMEOUT` | `5` | `SSH_CONNECT_TIMEOUT` | SSH connect timeout in seconds for remote polling |
 | `LOG_LEVEL` | `INFO` | -- | Python logging level |
 | `BEAMUX_BINARY` | `beamux` | `BEAMUX_BINARY` | Path to [beamux](https://github.com/beatrice-b-m/beamux) for pane layout creation |
@@ -270,6 +275,17 @@ All session endpoints are scoped under `/api/hosts/{host_id}/`.
 | `GET` | `/api/hosts/{host_id}/sessions/{name}/panes` | Pane layout |
 | `GET` | `/api/hosts/{host_id}/sessions/{name}/thumbnail.svg` | SVG snapshot |
 | `GET` | `/api/hosts/{host_id}/completions/path` | Directory autocompletion (localhost only) |
+| `POST` | `/api/hosts/{host_id}/sessions/from-template` | Create session from template |
+
+### Template management
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/templates` | List all templates with extracted variable names |
+| `POST` | `/api/templates` | Save a new template |
+| `PUT` | `/api/templates/{template_name}` | Update template content |
+| `PATCH` | `/api/templates/{template_name}` | Rename template (`{"new_name": "..."}`) |
+| `DELETE` | `/api/templates/{template_name}` | Delete a template |
 
 ### System
 
