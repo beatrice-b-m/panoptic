@@ -161,6 +161,11 @@ export class TerminalHandle {
             fontSize:    this._opts.fontSize   || 13,
             cursorBlink: true,
             scrollback:  5000,
+            // On macOS, xterm.js uses Option+click (not Shift+click) to force
+            // text selection when the application has mouse reporting enabled.
+            // Without this, there is no way to create an xterm.js selection
+            // while tmux mouse mode is on.
+            macOptionClickForcesSelection: true,
             theme: {
                 background:        '#000000',
                 selectionBackground: 'rgba(68, 152, 255, 0.35)',
