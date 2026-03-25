@@ -1,13 +1,15 @@
 # tmux-dash
 
-A lightweight web dashboard that discovers your tmux sessions and exposes each one as a live terminal in the browser via [ttyd](https://github.com/tsl0922/ttyd).
+A lightweight web dashboard that discovers your tmux sessions and exposes each one as a live terminal in the browser via [ttyd](https://github.com/tsl0922/ttyd). Supports multiple hosts — monitor local and remote machines from a single dashboard.
 
 <!-- screenshot: dashboard view -->
 
 ## Features
 
+- **Multi-host support** -- monitor tmux sessions on localhost and remote SSH hosts from one dashboard; host tabs switch context instantly
+- **SSH alias-first model** -- remote hosts use your `~/.ssh/config` aliases; tmux-dash never stores passwords or private keys
 - **Automatic session discovery** -- polls tmux every 5 s (active) / 30 s (idle), no manual registration
-- **Single terminal view** -- clicking a session opens one full ttyd terminal showing the real tmux layout (panes, splits, status bar); up to 19 concurrent sessions
+- **Single terminal view** -- clicking a session opens one full ttyd terminal showing the real tmux layout (panes, splits, status bar); up to 19 concurrent sessions across all hosts
 - **Session thumbnails** -- each gallery card shows a live text snapshot (SVG) of the session, refreshed approximately every 30 seconds
 - **Auto-refresh** -- dashboard reflects session create/destroy in real time without a page reload
 - **Light/dark theme** -- toggle in the header; persists to localStorage; follows `prefers-color-scheme` when no explicit choice is stored
@@ -17,7 +19,7 @@ A lightweight web dashboard that discovers your tmux sessions and exposes each o
 - **Remote access** -- bind on `0.0.0.0`; reach from any device on your Tailscale network
 - **Create sessions from UI** -- click "+New" to spawn a tmux session with optional working directory and pane layout
 - **Pane layout support** -- row or column layouts via colon-separated spec (e.g. `2:1:3`); live CSS grid preview before creation
-- **Directory autocompletion** -- server-side path completion when typing a working directory for new sessions
+- **Directory autocompletion** -- server-side path completion when typing a working directory for new sessions (localhost only)
 
 ## Prerequisites
 
@@ -28,6 +30,8 @@ A lightweight web dashboard that discovers your tmux sessions and exposes each o
 | Python 3.9+ | standard macOS install or `brew install python` |
 | tmux | `brew install tmux` |
 | [Tailscale](https://tailscale.com) | optional -- required only for remote/HTTPS access |
+
+For remote hosts: SSH access with key-based authentication (or ssh-agent / ControlMaster).
 
 ## Quick Start
 
@@ -60,6 +64,67 @@ python3 server.py
 
 Open `http://localhost:7680`. Press `Ctrl+C` to stop.
 
+## Multi-Host Setup
+
+### How it works
+
+tmux-dash can monitor tmux sessions on remote machines over SSH. The architecture is simple:
+
+1. **Polling:** The server runs `ssh <alias> tmux list-sessions` periodically to discover remote sessions.
+2. **Terminal access:** Each remote session gets a local ttyd process that runs `ssh <alias> tmux -u attach-session -t <name>`.
+3. **No remote installation needed** -- only SSH access and tmux on the remote machine.
+
+### Adding a remote host
+
+1. Click the **+** tab in the host bar.
+2. Enter a display **label** and the **SSH alias** from your `~/.ssh/config`.
+3. Click **Add Host**.
+
+The host appears as a new tab. Sessions are discovered on the next poll cycle.
+
+### SSH configuration
+
+All authentication and connection options are handled by OpenSSH via your `~/.ssh/config`. tmux-dash never stores passwords or private keys.
+
+Example `~/.ssh/config` entry:
+
+```
+Host pi
+    HostName 192.168.1.50
+    User pi
+    IdentityFile ~/.ssh/id_ed25519
+    # Optional: persistent connection for faster polling
+    ControlMaster auto
+    ControlPath ~/.ssh/sockets/%r@%h-%p
+    ControlPersist 600
+```
+
+### Authentication requirements
+
+Background polling uses `ssh -o BatchMode=yes` to avoid hanging on password prompts. This means:
+
+- **Key-based auth** (with or without ssh-agent) works seamlessly.
+- **Password-only hosts** will fail polling unless you have an active ControlMaster session.
+- If polling fails, the host tab shows an error indicator. The app remains responsive.
+
+### Host configuration file
+
+Hosts are stored in `hosts.json` (configurable via `HOSTS_CONFIG_PATH`):
+
+```json
+{
+  "hosts": [
+    { "id": "localhost", "label": "localhost", "type": "local", "enabled": true },
+    { "id": "pi", "label": "Raspberry Pi", "type": "ssh", "ssh_alias": "pi", "enabled": true }
+  ]
+}
+```
+
+- `localhost` always exists and cannot be removed.
+- `id` is auto-derived from the label (slug-safe, unique).
+- `type` is `"local"` or `"ssh"`.
+- `ssh_alias` matches a `Host` entry in `~/.ssh/config`.
+
 ## Configuration
 
 All tuneable constants live in `config.py`. Most can also be set via environment variable.
@@ -78,6 +143,8 @@ All tuneable constants live in `config.py`. Most can also be set via environment
 | `SESSION_PAGE_SIZE` | `8` | -- | Sessions shown per page on the dashboard |
 | `TLS_CERT` | *(empty)* | `TLS_CERT` | Path to TLS certificate file (PEM) |
 | `TLS_KEY` | *(empty)* | `TLS_KEY` | Path to TLS private key file (PEM) |
+| `HOSTS_CONFIG_PATH` | `hosts.json` | `HOSTS_CONFIG_PATH` | Path to JSON host configuration file |
+| `SSH_CONNECT_TIMEOUT` | `5` | `SSH_CONNECT_TIMEOUT` | SSH connect timeout in seconds for remote polling |
 | `LOG_LEVEL` | `INFO` | -- | Python logging level |
 | `BEAMUX_BINARY` | `~/AgentFiles/.../beamux` | `BEAMUX_BINARY` | Path to beamux script for pane layout creation |
 
@@ -98,12 +165,44 @@ The font must be installed on the **client device** (the browser). The setting i
 
 Each session card on the dashboard gallery shows a text-based SVG thumbnail of the terminal content. Thumbnails are:
 
-- Generated server-side via `tmux capture-pane`
+- Generated server-side via `tmux capture-pane` (works for both local and remote sessions)
 - Stripped of ANSI escape sequences for clean rendering
 - Cached for 30 seconds to avoid excessive tmux queries
 - Refreshed on a ~30 s bucket timer in the browser (independent of the 5/10 s poll cycle)
 
-The thumbnail API endpoint is `GET /api/sessions/{name}/thumbnail.svg`.
+## API
+
+All session endpoints are scoped under `/api/hosts/{host_id}/`.
+
+### Host management
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/hosts` | List configured hosts with runtime status |
+| `POST` | `/api/hosts` | Add SSH host (`{label, ssh_alias}`) |
+| `DELETE` | `/api/hosts/{host_id}` | Remove a host |
+
+### Session operations
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/hosts/{host_id}/sessions` | Paginated session list |
+| `POST` | `/api/hosts/{host_id}/sessions` | Create new session |
+| `GET` | `/api/hosts/{host_id}/sessions/{name}` | Session metadata + ttyd_url |
+| `DELETE` | `/api/hosts/{host_id}/sessions/{name}` | Kill session |
+| `GET` | `/api/hosts/{host_id}/sessions/{name}/panes` | Pane layout |
+| `GET` | `/api/hosts/{host_id}/sessions/{name}/thumbnail.svg` | SVG snapshot |
+| `GET` | `/api/hosts/{host_id}/completions/path` | Directory autocompletion (localhost only) |
+
+### System
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/health` | Liveness check |
+
+### Terminal proxy
+
+All terminal traffic is proxied through `GET /terminal/{host_id}/{session_name}/{path}`.
 
 ## HTTPS (Tailscale)
 
@@ -112,7 +211,6 @@ To serve the dashboard over HTTPS using Tailscale-provisioned certificates:
 ### 1. Provision certificates
 
 ```bash
-# Replace with your machine's Tailscale FQDN
 tailscale cert \
   --cert-file ~/.local/share/tmux-dash/cert.pem \
   --key-file  ~/.local/share/tmux-dash/key.pem \
@@ -120,8 +218,6 @@ tailscale cert \
 ```
 
 ### 2. Configure the server
-
-Set the `TLS_CERT` and `TLS_KEY` environment variables before starting:
 
 ```bash
 export TLS_CERT=~/.local/share/tmux-dash/cert.pem
@@ -137,37 +233,40 @@ Or for launchd, add these to the plist's `EnvironmentVariables` dict.
 https://beas-mac-mini.fable-cobia.ts.net:7680
 ```
 
-All terminal traffic is reverse-proxied through the dashboard port, so **only port 7680** needs to be reachable. The ttyd processes bind locally and are accessed via `/terminal/{session_name}/` paths on the main server.
+All terminal traffic is reverse-proxied through the dashboard port, so **only port 7680** needs to be reachable.
 
 ### Certificate renewal
 
-Tailscale certificates are valid for ~90 days. Re-run `tailscale cert` periodically to refresh them, then restart the service. A cron job or launchd timer can automate this.
+Tailscale certificates are valid for ~90 days. Re-run `tailscale cert` periodically to refresh them, then restart the service.
 
 ## Architecture
 
 ```
 Browser
-  |  HTTP(S) GET /                              -> dashboard (index.html + app.js)
-  |  HTTP(S) GET /api/sessions                  -> JSON list of live sessions
-  |  HTTP(S) POST /api/sessions                 -> create new session
-  |  HTTP(S) GET /api/sessions/{name}           -> session metadata + ttyd_url
-  |  HTTP(S) GET /api/sessions/{name}/thumbnail.svg -> SVG snapshot
-  |  HTTP(S) GET /api/completions/path?prefix=... -> directory autocompletion
-  |  HTTP(S) + WebSocket /terminal/{name}/...   -> reverse proxy to ttyd
+  |  HTTP(S) GET /                                             -> dashboard
+  |  HTTP(S) GET /api/hosts                                    -> host list + status
+  |  HTTP(S) POST /api/hosts                                   -> add SSH host
+  |  HTTP(S) GET /api/hosts/{host_id}/sessions                 -> session list
+  |  HTTP(S) POST /api/hosts/{host_id}/sessions                -> create session
+  |  HTTP(S) GET /api/hosts/{host_id}/sessions/{name}          -> session detail
+  |  HTTP(S) GET /api/hosts/{host_id}/sessions/{name}/thumbnail.svg
+  |  HTTP(S) GET /api/hosts/{host_id}/completions/path         -> dir autocomplete
+  |  HTTP(S) + WebSocket /terminal/{host_id}/{name}/...        -> reverse proxy to ttyd
   v
 server.py  (aiohttp, port 7680, optional TLS)
   |
+  +-- host_config.py    (JSON host persistence)
   +-- session_manager.py
-  |     +-- polls `tmux list-sessions` every N seconds
-  |     +-- spawns ttyd subprocess per session  (ports 7681-7699)
-  |     +-- captures pane text for SVG thumbnails (30 s cache)
+  |     +-- polls `tmux list-sessions` per host (local or via SSH)
+  |     +-- spawns local ttyd per session (direct tmux or ssh + tmux attach)
+  |     +-- captures pane text for thumbnails (local or via SSH)
   |     +-- kills ttyd when session disappears
   |
   +-- static/
         index.html, app.js, style.css
 ```
 
-Each tmux session gets its own `ttyd` process on a port drawn from the pool. The dashboard reverse-proxies all ttyd HTTP and WebSocket traffic through `/terminal/{session_name}/`, so the browser only needs to reach port 7680. tmux renders its own pane layout inside the terminal, so no per-pane iframe splitting is needed.
+Each tmux session gets its own local `ttyd` process on a port from the pool. For remote hosts, ttyd execs `ssh <alias> tmux -u attach-session -t <name>` instead of attaching directly. The dashboard reverse-proxies all traffic through `/terminal/{host_id}/{session_name}/`.
 
 ## launchd Management
 
