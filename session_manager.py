@@ -112,6 +112,11 @@ class SessionManager:
                 "Could not resolve tmux to absolute path; using %r", settings.tmux_binary
             )
 
+        # PID file tracking ttyd processes spawned by this instance.
+        # Lives next to the source files so it persists across restarts.
+        _project_dir = os.path.dirname(os.path.abspath(__file__))
+        self._ttyd_pid_file: str = os.path.join(_project_dir, '.ttyd.pids')
+
         # Initialise per-host structures for all configured hosts.
         self._sync_host_structures()
 
@@ -487,7 +492,7 @@ class SessionManager:
                 *cmd,
                 env=env,
                 stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
             )
         except FileNotFoundError:
             log.error(
@@ -515,6 +520,7 @@ class SessionManager:
         sess.port = port
         sess.ttyd_pid = process.pid
         sess._process = process
+        self._record_ttyd_pid(process.pid)
         log.info(
             "Spawned ttyd for %s/%s on port %d (pid=%d)",
             host_id, session_name, port, process.pid,
@@ -568,27 +574,69 @@ class SessionManager:
         log.info(
             "Killed ttyd for %s/%s (pid=%s)", host_id, session_name, sess.ttyd_pid
         )
+        if sess.ttyd_pid is not None:
+            self._remove_ttyd_pid(sess.ttyd_pid)
+
+    def _read_pid_file(self) -> set[int]:
+        """Read recorded ttyd PIDs from the PID file."""
+        try:
+            with open(self._ttyd_pid_file) as f:
+                return {int(line.strip()) for line in f if line.strip().isdigit()}
+        except FileNotFoundError:
+            return set()
+
+    def _write_pid_file(self, pids: set[int]) -> None:
+        """Write the current set of ttyd PIDs to the PID file."""
+        os.makedirs(os.path.dirname(self._ttyd_pid_file), exist_ok=True)
+        with open(self._ttyd_pid_file, 'w') as f:
+            for pid in sorted(pids):
+                f.write(f'{pid}\n')
+
+    def _record_ttyd_pid(self, pid: int) -> None:
+        """Add a PID to the PID file."""
+        pids = self._read_pid_file()
+        pids.add(pid)
+        self._write_pid_file(pids)
+
+    def _remove_ttyd_pid(self, pid: int) -> None:
+        """Remove a PID from the PID file."""
+        pids = self._read_pid_file()
+        pids.discard(pid)
+        self._write_pid_file(pids)
 
     async def _kill_stale_ttyd(self) -> None:
-        """Kill orphaned ttyd processes left over from a previous server run.
+        """Kill ttyd processes recorded by a previous server run."""
+        stale_pids = self._read_pid_file()
+        if not stale_pids:
+            return
 
-        Must be called before the first poll so freed ports are available
-        in the pool.  Matches ttyd processes that were spawned with
-        ``attach-session`` (our unique command-line signature).
-        """
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "pkill", "-f", "ttyd.*--base-path /terminal/.*attach-session",
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            await proc.wait()
-            if proc.returncode == 0:
-                log.info("Killed stale ttyd processes from a previous run")
-                # Brief pause so the OS releases the listening sockets.
-                await asyncio.sleep(0.5)
-        except FileNotFoundError:
-            log.debug("pkill not available; skipping orphan cleanup")
+        killed = False
+        for pid in stale_pids:
+            # Verify the PID is still a ttyd process (protects against PID recycling).
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    'ps', '-p', str(pid), '-o', 'comm=',
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                stdout, _ = await proc.communicate()
+                if 'ttyd' not in stdout.decode().strip():
+                    continue
+            except Exception:
+                continue
+
+            try:
+                os.kill(pid, signal.SIGTERM)
+                killed = True
+            except ProcessLookupError:
+                pass
+
+        # Clear the file regardless — stale PIDs are either killed or gone.
+        self._write_pid_file(set())
+
+        if killed:
+            log.info('Killed stale ttyd processes from a previous run')
+            await asyncio.sleep(0.5)
 
     # ------------------------------------------------------- layout helpers
 
@@ -962,6 +1010,7 @@ class SessionManager:
         for host_id in list(self._host_sessions):
             for name in list(self._host_sessions[host_id]):
                 await self._kill_ttyd(host_id, name)
+        self._write_pid_file(set())
 
     # --------------------------------------------------------- polling loop
 

@@ -15,6 +15,7 @@ import asyncio
 import logging
 import ssl
 import time
+import socket
 from pathlib import Path
 from urllib.parse import quote as urlquote
 
@@ -762,7 +763,6 @@ def _build_ssl_context(settings: RuntimeSettings) -> ssl.SSLContext | None:
 async def on_startup(app: web.Application) -> None:
     global _last_activity, _wake_event
     settings: RuntimeSettings = app["settings"]
-
     host_config = HostConfig(path=settings.hosts_config_path)
     app["host_config"] = host_config
 
@@ -911,6 +911,23 @@ def run_server(settings: RuntimeSettings) -> None:
     ssl_ctx = _build_ssl_context(settings)
     app = build_app(settings)
     app["_tls_enabled"] = ssl_ctx is not None
+
+
+    # Fail fast if the HTTP port is already in use — avoid destroying
+    # ttyd processes that belong to another running instance.
+    _sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    _sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        _sock.bind((settings.host, settings.port))
+    except OSError:
+        log.error(
+            "Port %d already in use; aborting startup to avoid killing "
+            "ttyd processes from the running instance",
+            settings.port,
+        )
+        raise SystemExit(1)
+    finally:
+        _sock.close()
 
     web.run_app(
         app,
