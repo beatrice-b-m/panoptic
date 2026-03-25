@@ -23,18 +23,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 from urllib.parse import quote as urlquote
 
-from config import (
-    POLL_INTERVAL_ACTIVE,
-    POLL_INTERVAL_IDLE,
-    SESSION_PAGE_SIZE,
-    SSH_CONNECT_TIMEOUT,
-    TMUX_BINARY,
-    TTYD_BIND_HOST,
-    TTYD_BINARY,
-    TTYD_FONT_FAMILY,
-    TTYD_PORT_RANGE_END,
-    TTYD_PORT_RANGE_START,
-)
+from config import RuntimeSettings
 from host_config import HostConfig
 
 log = logging.getLogger(__name__)
@@ -87,12 +76,13 @@ class SessionInfo:
 
 
 class SessionManager:
-    def __init__(self, host_config: HostConfig) -> None:
+    def __init__(self, host_config: HostConfig, settings: RuntimeSettings) -> None:
         self._host_config = host_config
+        self._settings = settings
 
         # Port pool: deque gives O(1) allocate/release. Shared across all hosts.
         self._port_pool: deque[int] = deque(
-            range(TTYD_PORT_RANGE_START, TTYD_PORT_RANGE_END + 1)
+            range(settings.ttyd_port_start, settings.ttyd_port_end + 1)
         )
         self._allocated_ports: set[int] = set()
 
@@ -109,16 +99,16 @@ class SessionManager:
 
         # Resolve local binaries to absolute paths once so ttyd's child process
         # does not depend on PATH propagation (which fails under launchd).
-        self._ttyd_path = shutil.which(TTYD_BINARY) or TTYD_BINARY
-        self._tmux_path = shutil.which(TMUX_BINARY) or TMUX_BINARY
+        self._ttyd_path = shutil.which(settings.ttyd_binary) or settings.ttyd_binary
+        self._tmux_path = shutil.which(settings.tmux_binary) or settings.tmux_binary
         self._ssh_path = shutil.which("ssh") or "ssh"
-        if self._ttyd_path == TTYD_BINARY:
+        if self._ttyd_path == settings.ttyd_binary:
             log.warning(
-                "Could not resolve ttyd to absolute path; using %r", TTYD_BINARY
+                "Could not resolve ttyd to absolute path; using %r", settings.ttyd_binary
             )
-        if self._tmux_path == TMUX_BINARY:
+        if self._tmux_path == settings.tmux_binary:
             log.warning(
-                "Could not resolve tmux to absolute path; using %r", TMUX_BINARY
+                "Could not resolve tmux to absolute path; using %r", settings.tmux_binary
             )
 
         # Initialise per-host structures for all configured hosts.
@@ -191,7 +181,7 @@ class SessionManager:
             proc = await asyncio.create_subprocess_exec(
                 self._ssh_path,
                 "-o", "BatchMode=yes",
-                "-o", f"ConnectTimeout={SSH_CONNECT_TIMEOUT}",
+                "-o", f"ConnectTimeout={self._settings.ssh_connect_timeout}",
                 host["ssh_alias"],
                 "tmux", *args,
                 stdout=asyncio.subprocess.PIPE,
@@ -199,7 +189,7 @@ class SessionManager:
             )
             try:
                 stdout, _ = await asyncio.wait_for(
-                    proc.communicate(), timeout=SSH_CONNECT_TIMEOUT + 15
+                    proc.communicate(), timeout=self._settings.ssh_connect_timeout + 15
                 )
             except asyncio.TimeoutError:
                 try:
@@ -257,7 +247,7 @@ class SessionManager:
             proc = await asyncio.create_subprocess_exec(
                 self._ssh_path,
                 "-o", "BatchMode=yes",
-                "-o", f"ConnectTimeout={SSH_CONNECT_TIMEOUT}",
+                "-o", f"ConnectTimeout={self._settings.ssh_connect_timeout}",
                 host["ssh_alias"],
                 "tmux", "list-sessions", "-F", fmt,
                 stdout=asyncio.subprocess.PIPE,
@@ -265,7 +255,7 @@ class SessionManager:
             )
             try:
                 stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                    proc.communicate(), timeout=SSH_CONNECT_TIMEOUT + 15
+                    proc.communicate(), timeout=self._settings.ssh_connect_timeout + 15
                 )
                 returncode = proc.returncode
             except asyncio.TimeoutError:
@@ -485,10 +475,10 @@ class SessionManager:
         cmd = [
             self._ttyd_path,
             "--port", str(port),
-            "--interface", TTYD_BIND_HOST,
+            "--interface", self._settings.ttyd_bind_host,
             "--writable",
             "--base-path", base_path,
-            "-t", f"fontFamily={TTYD_FONT_FAMILY}",
+            "-t", f"fontFamily={self._settings.ttyd_font_family}",
             *attach_cmd,
         ]
 
@@ -872,9 +862,9 @@ class SessionManager:
             while True:
                 await self.poll_sessions()
                 interval = (
-                    POLL_INTERVAL_ACTIVE
+                    self._settings.poll_interval_active
                     if get_client_count() > 0
-                    else POLL_INTERVAL_IDLE
+                    else self._settings.poll_interval_idle
                 )
                 await asyncio.sleep(interval)
 
@@ -896,9 +886,11 @@ class SessionManager:
     # -------------------------------------------------- session list for API
 
     def get_sessions(
-        self, host_id: str, page: int = 1, page_size: int = SESSION_PAGE_SIZE
+        self, host_id: str, page: int = 1, page_size: int | None = None
     ) -> dict:
         """Return a paginated session list for a specific host."""
+        if page_size is None:
+            page_size = self._settings.session_page_size
         host_sessions = self._host_sessions.get(host_id, {})
         all_sessions = sorted(host_sessions.values(), key=lambda s: s.name)
         total = len(all_sessions)

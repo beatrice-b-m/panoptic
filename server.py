@@ -20,14 +20,7 @@ from urllib.parse import quote as urlquote
 import aiohttp
 from aiohttp import web
 
-from config import (
-    DASHBOARD_HOST,
-    DASHBOARD_PORT,
-    LOG_LEVEL,
-    SESSION_PAGE_SIZE,
-    TLS_CERT,
-    TLS_KEY,
-)
+from config import RuntimeSettings
 from host_config import HostConfig
 from session_manager import SessionManager
 
@@ -151,10 +144,11 @@ async def handle_remove_host(request: web.Request) -> web.Response:
 
 async def handle_sessions(request: web.Request) -> web.Response:
     mgr: SessionManager = request.app["session_manager"]
+    settings = request.app["settings"]
     host_id = request.match_info["host_id"]
 
     page = _int_param(request, "page", 1)
-    page_size = _int_param(request, "page_size", SESSION_PAGE_SIZE)
+    page_size = _int_param(request, "page_size", settings.session_page_size)
 
     data = mgr.get_sessions(host_id, page=page, page_size=page_size)
     return web.json_response(data)
@@ -476,22 +470,22 @@ def _int_param(request: web.Request, name: str, default: int) -> int:
         return default
 
 
-def _build_ssl_context() -> ssl.SSLContext | None:
-    """Create an SSL context from TLS_CERT/TLS_KEY, or None for plain HTTP."""
-    if not TLS_CERT or not TLS_KEY:
+def _build_ssl_context(settings: RuntimeSettings) -> ssl.SSLContext | None:
+    """Create an SSL context from settings.tls_cert/tls_key, or None for plain HTTP."""
+    if not settings.tls_cert or not settings.tls_key:
         return None
 
-    cert_path = Path(TLS_CERT)
-    key_path = Path(TLS_KEY)
+    cert_path = Path(settings.tls_cert)
+    key_path = Path(settings.tls_key)
 
     if not cert_path.is_file():
         log.warning(
-            "TLS_CERT=%s does not exist; falling back to plain HTTP", TLS_CERT
+            "TLS_CERT=%s does not exist; falling back to plain HTTP", settings.tls_cert
         )
         return None
     if not key_path.is_file():
         log.warning(
-            "TLS_KEY=%s does not exist; falling back to plain HTTP", TLS_KEY
+            "TLS_KEY=%s does not exist; falling back to plain HTTP", settings.tls_key
         )
         return None
 
@@ -507,10 +501,12 @@ def _build_ssl_context() -> ssl.SSLContext | None:
 
 
 async def on_startup(app: web.Application) -> None:
-    host_config = HostConfig()
+    settings: RuntimeSettings = app["settings"]
+
+    host_config = HostConfig(path=settings.hosts_config_path)
     app["host_config"] = host_config
 
-    mgr = SessionManager(host_config)
+    mgr = SessionManager(host_config, settings)
     app["session_manager"] = mgr
     app["start_time"] = time.monotonic()
 
@@ -534,8 +530,8 @@ async def on_startup(app: web.Application) -> None:
     log.info(
         "tmux-dash started on %s://%s:%d — %d session(s) discovered across %d host(s)",
         scheme,
-        DASHBOARD_HOST,
-        DASHBOARD_PORT,
+        settings.host,
+        settings.port,
         total,
         len(host_config.list_hosts()),
     )
@@ -560,8 +556,9 @@ async def on_cleanup(app: web.Application) -> None:
     log.info("tmux-dash shut down cleanly")
 
 
-def build_app() -> web.Application:
+def build_app(settings: RuntimeSettings) -> web.Application:
     app = web.Application(middlewares=[client_tracking_middleware])
+    app["settings"] = settings
 
     # Root
     app.router.add_get("/", handle_index)
@@ -620,24 +617,29 @@ def build_app() -> web.Application:
 # ---------------------------------------------------------------------------
 
 
-def main() -> None:
+def run_server(settings: RuntimeSettings) -> None:
+    """Configure logging, build the app, and run it.  Called by the CLI."""
     logging.basicConfig(
-        level=getattr(logging, LOG_LEVEL, logging.INFO),
+        level=getattr(logging, settings.log_level, logging.INFO),
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    ssl_ctx = _build_ssl_context()
-    app = build_app()
+    ssl_ctx = _build_ssl_context(settings)
+    app = build_app(settings)
     app["_tls_enabled"] = ssl_ctx is not None
 
     web.run_app(
         app,
-        host=DASHBOARD_HOST,
-        port=DASHBOARD_PORT,
+        host=settings.host,
+        port=settings.port,
         ssl_context=ssl_ctx,
         print=None,
     )
+
+
+def main() -> None:
+    run_server(RuntimeSettings.from_defaults())
 
 
 if __name__ == "__main__":
