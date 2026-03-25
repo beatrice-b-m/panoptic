@@ -308,7 +308,7 @@ To serve the dashboard over HTTPS using Tailscale-provisioned certificates:
 tailscale cert \
   --cert-file ~/.local/share/panoptic/cert.pem \
   --key-file  ~/.local/share/panoptic/key.pem \
-  beas-mac-mini.fable-cobia.ts.net
+  <tailscale-dns-name>.ts.net
 ```
 
 ### 2. Configure the server
@@ -324,7 +324,7 @@ Or pass them as CLI flags: `python3 panoptic_cli.py serve --tls-cert /path/to/ce
 ### 3. Access
 
 ```
-https://beas-mac-mini.fable-cobia.ts.net:7680
+https://<tailscale-dns-name>.ts.net:7680
 ```
 
 All terminal traffic is reverse-proxied through the dashboard port, so **only port 7680** needs to be reachable.
