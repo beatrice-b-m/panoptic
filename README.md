@@ -25,37 +25,68 @@ A lightweight web dashboard that discovers your tmux sessions and exposes each o
 
 | Requirement | Notes |
 |---|---|
-| macOS | launchd integration is macOS-only |
-| [Homebrew](https://brew.sh) | used to install `ttyd` |
-| Python 3.9+ | standard macOS install or `brew install python` |
-| tmux | `brew install tmux` |
+| Python 3.9+ | `python3 --version` to check |
+| tmux | `brew install tmux` (macOS) or `sudo apt install tmux` (Ubuntu) |
+| [ttyd](https://github.com/tsl0922/ttyd) | see platform-specific instructions below |
 | [Tailscale](https://tailscale.com) | optional -- required only for remote/HTTPS access |
 
 For remote hosts: SSH access with key-based authentication (or ssh-agent / ControlMaster).
 
-## Quick Start
+### Installing ttyd
+
+**macOS (Homebrew):**
+
+```bash
+brew install ttyd
+```
+
+**Ubuntu / Debian:**
+
+```bash
+sudo apt install build-essential cmake git libjson-c-dev libwebsockets-dev
+git clone https://github.com/tsl0922/ttyd.git
+cd ttyd && mkdir build && cd build
+cmake ..
+make && sudo make install
+```
+
+Or grab a static binary from the [ttyd releases page](https://github.com/tsl0922/ttyd/releases):
+
+```bash
+curl -fsSL https://github.com/tsl0922/ttyd/releases/latest/download/ttyd.x86_64 -o ttyd
+chmod +x ttyd
+sudo mv ttyd /usr/local/bin/
+```
+
+Verify the install: `ttyd --version`.
+
+## Quick Start (macOS)
 
 ```bash
 git clone https://github.com/youruser/tmux-local-dash && cd tmux-local-dash
 ./install.sh
 ```
 
-Then open:
+The install script installs dependencies via Homebrew, substitutes paths in the launchd plist, copies it to `~/Library/LaunchAgents/`, and loads the service.
 
-- **Local:** `http://localhost:7680`
-- **Remote (Tailscale):** `http://<tailscale-ip>:7680`
+## Quick Start (Ubuntu / Linux)
 
-The install script installs dependencies, substitutes paths in the launchd plist, copies it to `~/Library/LaunchAgents/`, and loads the service.
+```bash
+git clone https://github.com/youruser/tmux-local-dash && cd tmux-local-dash
+pip3 install aiohttp
 
-`python3 tmux_dash_cli.py serve` is the canonical entrypoint. `install.sh` configures launchd to use it automatically.
+# Start in foreground
+python3 tmux_dash_cli.py serve
+```
+
+To run as a persistent service, see [systemd Setup](#systemd-setup-linux) below.
 
 ## Manual Setup
 
-If you prefer not to use `install.sh`:
+If you prefer not to use `install.sh` (macOS) or want a minimal install on any platform:
 
 ```bash
-# 1. Install ttyd
-brew install ttyd
+# 1. Install ttyd (see platform instructions above)
 
 # 2. Install Python dependency
 pip3 install aiohttp
@@ -65,7 +96,6 @@ python3 tmux_dash_cli.py serve
 ```
 
 Open `http://localhost:7680`. Press `Ctrl+C` to stop.
-
 ## CLI Usage
 
 The CLI provides a `serve` subcommand with full control over runtime settings:
@@ -272,7 +302,7 @@ export TLS_KEY=~/.local/share/tmux-dash/key.pem
 python3 tmux_dash_cli.py serve
 ```
 
-Or for launchd, add these to the plist's `EnvironmentVariables` dict.
+Or pass them as CLI flags: `python3 tmux_dash_cli.py serve --tls-cert /path/to/cert.pem --tls-key /path/to/key.pem`. For launchd, add them to the plist's `EnvironmentVariables` dict. For systemd, add `Environment=` directives to the unit override.
 
 ### 3. Access
 
@@ -315,7 +345,9 @@ server.py  (aiohttp, port 7680, optional TLS)
 
 Each tmux session gets its own local `ttyd` process on a port from the pool. For remote hosts, ttyd execs `ssh <alias> tmux -u attach-session -t <name>` instead of attaching directly. The dashboard reverse-proxies all traffic through `/terminal/{host_id}/{session_name}/`.
 
-## launchd Management
+## Service Management
+
+### launchd (macOS)
 
 The service label is `com.user.tmux-dash`.
 
@@ -334,9 +366,28 @@ launchctl unload ~/Library/LaunchAgents/com.user.tmux-dash.plist
 launchctl load  ~/Library/LaunchAgents/com.user.tmux-dash.plist
 ```
 
+### systemd Setup (Linux)
+
+A systemd user unit is provided in `tmux-dash.service`. Install it:
+
+```bash
+# Edit the unit file: replace __INSTALL_DIR__ with the actual project path
+sed "s|__INSTALL_DIR__|$(pwd)|g" tmux-dash.service > ~/.config/systemd/user/tmux-dash.service
+
+# Reload and start
+systemctl --user daemon-reload
+systemctl --user enable --now tmux-dash
+
+# Check status
+systemctl --user status tmux-dash
+
+# View logs
+journalctl --user -u tmux-dash -f
+```
+
 ### Log files
 
-Logs are written to the install directory under `logs/`:
+**macOS (launchd):** Logs are written to the install directory under `logs/`:
 
 | File | Content |
 |---|---|
@@ -348,13 +399,29 @@ tail -f <install-dir>/logs/stdout.log
 tail -f <install-dir>/logs/stderr.log
 ```
 
+**Linux (systemd):** Logs go to journald by default:
+
+```bash
+journalctl --user -u tmux-dash -f
+```
+
 ## Uninstall
+
+**macOS:**
 
 ```bash
 ./install.sh --uninstall
 ```
 
 This unloads the launchd service and removes the plist from `~/Library/LaunchAgents/`. It does not delete the project directory or installed pip packages.
+
+**Linux:**
+
+```bash
+systemctl --user disable --now tmux-dash
+rm ~/.config/systemd/user/tmux-dash.service
+systemctl --user daemon-reload
+```
 
 ## License
 

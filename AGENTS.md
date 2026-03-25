@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-`tmux-dash` is a browser-based tmux session monitor and terminal interface. It runs as a persistent local web server on macOS, discovers active tmux sessions, and exposes them as interactive terminals in the browser via [ttyd](https://github.com/nickthecook/ttyd). Designed as a single-user personal tool accessed exclusively over a Tailscale private network.
+`tmux-dash` is a browser-based tmux session monitor and terminal interface. It runs as a persistent local web server, discovers active tmux sessions, and exposes them as interactive terminals in the browser via [ttyd](https://github.com/tsl0922/ttyd). Designed as a single-user personal tool accessed exclusively over a Tailscale private network.
 
 **Primary use case:** Monitoring and interacting with Oh-My-Pi (OMP) agentic coding agent sessions from a remote browser.
 
@@ -47,7 +47,8 @@ tmux-dash/
 │   ├── app.js             # Vanilla JS: fetch, polling, pane layout, iframe management
 │   └── style.css          # Dark terminal theme (no frameworks)
 ├── logs/                  # stdout.log, stderr.log (launchd-managed)
-├── com.user.tmux-dash.plist  # launchd plist template
+├── com.user.tmux-dash.plist  # launchd plist template (macOS)
+├── tmux-dash.service          # systemd unit template (Linux)
 ├── install.sh             # Setup: brew deps, pip deps, launchd registration
 ├── SYSTEM_SPEC.md         # Authoritative design document
 ├── .env                   # Environment overrides (gitignored)
@@ -64,7 +65,8 @@ tmux-dash/
 | `server.py` | HTTP server wiring: REST endpoints, static files, idle/active mode |
 | `static/app.js` | Frontend logic: session list, pane renderer, iframe embedding |
 | `com.user.tmux-dash.plist` | macOS launchd service definition |
-| `install.sh` | One-shot setup script |
+| `tmux-dash.service` | Linux systemd user unit definition |
+| `install.sh` | One-shot setup script (macOS) |
 
 ## Runtime & Tooling
 
