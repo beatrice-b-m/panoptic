@@ -29,31 +29,30 @@ log = logging.getLogger(__name__)
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 # ---------------------------------------------------------------------------
-# Client tracking — SessionManager uses this to decide polling interval
+# Client activity tracking — timestamp-based instead of request counting.
+# SessionManager uses this to decide polling interval / deep idle.
 # ---------------------------------------------------------------------------
 
-_active_clients: int = 0
+_last_activity: float = 0.0
+_wake_event: asyncio.Event | None = None
 
 
-def _get_client_count() -> int:
-    return _active_clients
+def _get_last_activity() -> float:
+    return _last_activity
 
 
-# ---------------------------------------------------------------------------
-# Middleware: track active HTTP connections as a proxy for "someone is using
-# the dashboard".
-# ---------------------------------------------------------------------------
+def _get_wake_event() -> asyncio.Event | None:
+    return _wake_event
 
 
 @web.middleware
 async def client_tracking_middleware(request: web.Request, handler):
-    global _active_clients
-    _active_clients += 1
-    try:
-        return await handler(request)
-    finally:
-        _active_clients -= 1
-
+    global _last_activity
+    _last_activity = time.monotonic()
+    # Wake the polling loop if it is sleeping in deep idle.
+    if _wake_event is not None:
+        _wake_event.set()
+    return await handler(request)
 
 
 @web.middleware
@@ -510,6 +509,7 @@ def _build_ssl_context(settings: RuntimeSettings) -> ssl.SSLContext | None:
 
 
 async def on_startup(app: web.Application) -> None:
+    global _last_activity, _wake_event
     settings: RuntimeSettings = app["settings"]
 
     host_config = HostConfig(path=settings.hosts_config_path)
@@ -527,10 +527,13 @@ async def on_startup(app: web.Application) -> None:
 
     # Run an initial poll so the API has data before the first client connects.
     await mgr.poll_sessions()
+    # Initialise activity tracking so the server starts in active mode.
+    _last_activity = time.monotonic()
+    _wake_event = asyncio.Event()
 
     # Start the background polling loop.
     app["poll_task"] = asyncio.create_task(
-        mgr.start_polling(_get_client_count),
+        mgr.start_polling(_get_last_activity, _get_wake_event),
         name="session-poll-driver",
     )
 

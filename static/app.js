@@ -5,6 +5,7 @@ let currentHostId = 'localhost';  // active host tab
 let currentPage = 1;
 let currentSession = null;  // session name while in session view, null for dashboard
 let sessionPollTimer = null;
+let hostPollTimer = null;
 
 // Keyed reconciliation state: session name -> card DOM element.
 const _cardMap = new Map();
@@ -229,6 +230,19 @@ function stopSessionPolling() {
     }
 }
 
+function startHostPolling() {
+    stopHostPolling();
+    fetchHosts();
+    hostPollTimer = setInterval(fetchHosts, 60_000);
+}
+
+function stopHostPolling() {
+    if (hostPollTimer !== null) {
+        clearInterval(hostPollTimer);
+        hostPollTimer = null;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Session list — keyed reconciliation
 // ---------------------------------------------------------------------------
@@ -261,8 +275,6 @@ async function fetchSessions(page = 1) {
         if (seq === _fetchSeq) setRefreshing(false);
     }
 
-    // Also refresh host statuses periodically.
-    fetchHosts();
 }
 
 function renderSessions(data) {
@@ -1110,6 +1122,21 @@ document.addEventListener('DOMContentLoaded', () => {
             openSession(sessionParam);
         } else {
             startSessionPolling();
+        }
+        startHostPolling();
+    });
+
+    // Pause polling when the tab is hidden to save resources.
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden) {
+            stopSessionPolling();
+            stopHostPolling();
+        } else {
+            // Tab became visible — resume the appropriate polling.
+            if (!currentSession) {
+                startSessionPolling();
+            }
+            startHostPolling();
         }
     });
 });

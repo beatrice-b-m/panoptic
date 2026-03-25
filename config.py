@@ -25,6 +25,10 @@ TTYD_FONT_FAMILY = os.getenv("TTYD_FONT_FAMILY", "'Hack Nerd Font', 'Hack Nerd F
 POLL_INTERVAL_ACTIVE = 5
 POLL_INTERVAL_IDLE = 30
 
+# Client activity detection
+CLIENT_ACTIVE_TIMEOUT = 60          # seconds — "active" if last request within this window
+CLIENT_DEEP_IDLE_TIMEOUT = 300      # seconds — stop polling entirely after this long
+
 # Dashboard pagination
 SESSION_PAGE_SIZE = 8
 
@@ -71,6 +75,8 @@ class RuntimeSettings:
     ttyd_font_family: str = TTYD_FONT_FAMILY
     poll_interval_active: int = POLL_INTERVAL_ACTIVE
     poll_interval_idle: int = POLL_INTERVAL_IDLE
+    client_active_timeout: int = CLIENT_ACTIVE_TIMEOUT
+    client_deep_idle_timeout: int = CLIENT_DEEP_IDLE_TIMEOUT
     session_page_size: int = SESSION_PAGE_SIZE
     log_level: str = LOG_LEVEL
     tls_cert: str = TLS_CERT

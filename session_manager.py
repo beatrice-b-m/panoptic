@@ -845,18 +845,71 @@ class SessionManager:
 
     # --------------------------------------------------------- polling loop
 
-    async def start_polling(self, get_client_count: Callable[[], int]) -> None:
-        """Run the reconciliation loop until cancelled."""
+    async def start_polling(
+        self,
+        get_last_activity: Callable[[], float],
+        get_wake_event: Callable[[], asyncio.Event | None] | None = None,
+    ) -> None:
+        """Run the reconciliation loop with three-tier idle management.
+
+        Active:     poll every ``poll_interval_active`` seconds.
+        Idle:       poll every ``poll_interval_idle`` seconds.
+        Deep idle:  skip polling entirely; sleep at idle interval.
+
+        The tier is determined by the elapsed time since the last client
+        HTTP request (provided by *get_last_activity*).
+
+        An optional *get_wake_event* callback supplies an ``asyncio.Event``
+        that is set when a request arrives, allowing the loop to cut short
+        a deep-idle sleep and poll immediately.
+        """
+        _prev_state: str | None = None
+
+        async def _interruptible_sleep(seconds: float) -> None:
+            """Sleep for *seconds*, but return early if the wake event fires."""
+            evt = get_wake_event() if get_wake_event else None
+            if evt is None:
+                await asyncio.sleep(seconds)
+                return
+            evt.clear()
+            try:
+                await asyncio.wait_for(evt.wait(), timeout=seconds)
+            except asyncio.TimeoutError:
+                pass
 
         async def _loop() -> None:
+            nonlocal _prev_state
             while True:
-                await self.poll_sessions()
-                interval = (
-                    self._settings.poll_interval_active
-                    if get_client_count() > 0
-                    else self._settings.poll_interval_idle
-                )
-                await asyncio.sleep(interval)
+                now = time.monotonic()
+                idle_secs = now - get_last_activity()
+
+                if idle_secs < self._settings.client_active_timeout:
+                    state = "active"
+                    await self.poll_sessions()
+                    interval = self._settings.poll_interval_active
+                elif idle_secs < self._settings.client_deep_idle_timeout:
+                    state = "idle"
+                    await self.poll_sessions()
+                    interval = self._settings.poll_interval_idle
+                else:
+                    state = "deep_idle"
+                    # Skip polling — nobody is looking.
+                    interval = self._settings.poll_interval_idle
+
+                if state != _prev_state:
+                    if _prev_state is not None:
+                        log.info("Polling state: %s -> %s", _prev_state, state)
+                    _prev_state = state
+
+                await _interruptible_sleep(interval)
+
+                # If we were in deep idle and got woken, do an immediate poll
+                # before the next loop iteration determines state.
+                if state == "deep_idle":
+                    evt = get_wake_event() if get_wake_event else None
+                    if evt and evt.is_set():
+                        log.info("Waking from deep idle — client activity detected")
+                        await self.poll_sessions()
 
         self._poll_task = asyncio.create_task(_loop(), name="session-poll")
         try:
