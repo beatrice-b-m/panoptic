@@ -39,3 +39,12 @@ LOG_LEVEL = "INFO"
 # When unset or empty, the server runs plain HTTP.
 TLS_CERT = os.getenv("TLS_CERT", "")
 TLS_KEY = os.getenv("TLS_KEY", "")
+
+# Multi-host configuration
+HOSTS_CONFIG_PATH = os.getenv(
+    "HOSTS_CONFIG_PATH",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "hosts.json"),
+)
+
+# SSH tunables for remote host polling (BatchMode is always on).
+SSH_CONNECT_TIMEOUT = int(os.getenv("SSH_CONNECT_TIMEOUT", "5"))

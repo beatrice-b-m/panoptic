@@ -6,3 +6,7 @@ __pycache__/
 *.pyc
 
 .omp/
+
+
+# Host config (user-specific)
+hosts.json
