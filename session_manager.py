@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-"""Session manager: tracks tmux sessions and owns ttyd subprocess lifecycle."""
+"""Session manager: tracks tmux sessions across multiple hosts and owns ttyd lifecycle.
+
+Hosts are either local (direct tmux subprocess) or remote (tmux over SSH).
+The port pool and ttyd processes always run locally — for remote hosts, ttyd
+execs ``ssh <alias> tmux -u attach-session -t <name>`` instead of a direct
+tmux attach.
+"""
 
 import asyncio
 import html as html_mod
@@ -21,17 +27,17 @@ from config import (
     POLL_INTERVAL_ACTIVE,
     POLL_INTERVAL_IDLE,
     SESSION_PAGE_SIZE,
+    SSH_CONNECT_TIMEOUT,
     TMUX_BINARY,
-    BEAMUX_BINARY,
     TTYD_BIND_HOST,
     TTYD_BINARY,
     TTYD_FONT_FAMILY,
     TTYD_PORT_RANGE_END,
     TTYD_PORT_RANGE_START,
 )
+from host_config import HostConfig
 
 log = logging.getLogger(__name__)
-
 
 
 # Thumbnail snapshot: cached captured-pane text per session.
@@ -40,10 +46,29 @@ SNAPSHOT_MAX_LINES = 24
 SNAPSHOT_MAX_COLS = 80
 
 # Strip ANSI escape sequences (CSI, OSC, and simple ESC sequences).
-_ANSI_RE = re.compile(r"\x1b(?:\[[0-9;?]*[A-Za-z]|\].*?(?:\x07|\x1b\\)|[()][AB012]|[>=<78HMDE])")
+_ANSI_RE = re.compile(
+    r"\x1b(?:\[[0-9;?]*[A-Za-z]|\].*?(?:\x07|\x1b\\)|[()][AB012]|[>=<78HMDE])"
+)
 SESSION_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+# ---------------------------------------------------------------------------
+# Data classes
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class HostStatus:
+    """Runtime connectivity/health state for a host (not persisted)."""
+
+    status: str = "unknown"  # "ok" | "unreachable" | "auth_error" | "error" | "unknown"
+    message: str = ""
+    last_ok: float = 0.0  # monotonic timestamp of last successful poll
+
+
 @dataclass
 class SessionInfo:
+    host_id: str
     name: str
     windows: int
     attached: bool
@@ -51,32 +76,82 @@ class SessionInfo:
     port: int | None = None
     ttyd_pid: int | None = None
     # The live asyncio Process handle — not part of the serialisable API surface.
-    _process: asyncio.subprocess.Process | None = field(default=None, repr=False, compare=False)
+    _process: asyncio.subprocess.Process | None = field(
+        default=None, repr=False, compare=False
+    )
+
+
+# ---------------------------------------------------------------------------
+# SessionManager
+# ---------------------------------------------------------------------------
 
 
 class SessionManager:
-    def __init__(self) -> None:
-        # Port pool: deque gives O(1) allocate/release.
+    def __init__(self, host_config: HostConfig) -> None:
+        self._host_config = host_config
+
+        # Port pool: deque gives O(1) allocate/release. Shared across all hosts.
         self._port_pool: deque[int] = deque(
             range(TTYD_PORT_RANGE_START, TTYD_PORT_RANGE_END + 1)
         )
         self._allocated_ports: set[int] = set()
 
-        self.sessions: dict[str, SessionInfo] = {}
+        # Per-host session registries: host_id -> {session_name -> SessionInfo}
+        self._host_sessions: dict[str, dict[str, SessionInfo]] = {}
+
+        # Per-host runtime status
+        self._host_status: dict[str, HostStatus] = {}
+
+        # Per-host snapshot caches: host_id -> {session_name -> (text, ts)}
+        self._snapshot_cache: dict[str, dict[str, tuple[str, float]]] = {}
 
         self._poll_task: asyncio.Task | None = None
 
-        # Thumbnail snapshot cache: session_name -> (text, timestamp).
-        self._snapshot_cache: dict[str, tuple[str, float]] = {}
-
-        # Resolve binaries to absolute paths once so ttyd's child process
+        # Resolve local binaries to absolute paths once so ttyd's child process
         # does not depend on PATH propagation (which fails under launchd).
         self._ttyd_path = shutil.which(TTYD_BINARY) or TTYD_BINARY
         self._tmux_path = shutil.which(TMUX_BINARY) or TMUX_BINARY
+        self._ssh_path = shutil.which("ssh") or "ssh"
         if self._ttyd_path == TTYD_BINARY:
-            log.warning("Could not resolve ttyd to absolute path; using %r", TTYD_BINARY)
+            log.warning(
+                "Could not resolve ttyd to absolute path; using %r", TTYD_BINARY
+            )
         if self._tmux_path == TMUX_BINARY:
-            log.warning("Could not resolve tmux to absolute path; using %r", TMUX_BINARY)
+            log.warning(
+                "Could not resolve tmux to absolute path; using %r", TMUX_BINARY
+            )
+
+        # Initialise per-host structures for all configured hosts.
+        self._sync_host_structures()
+
+    # --------------------------------------------------------- host structures
+
+    def _sync_host_structures(self) -> None:
+        """Ensure per-host dicts exist for every configured host."""
+        for host in self._host_config.list_hosts():
+            hid = host["id"]
+            self._host_sessions.setdefault(hid, {})
+            self._host_status.setdefault(hid, HostStatus())
+            self._snapshot_cache.setdefault(hid, {})
+
+    def reload_hosts(self) -> None:
+        """Re-sync after host config changes (add/remove)."""
+        self._sync_host_structures()
+
+    def sessions_for_host(self, host_id: str) -> dict[str, SessionInfo]:
+        """Return the session dict for a host (empty dict if unknown)."""
+        return self._host_sessions.get(host_id, {})
+
+    def get_host_statuses(self) -> dict[str, dict]:
+        """Return runtime status for every tracked host."""
+        return {
+            hid: {
+                "status": hs.status,
+                "message": hs.message,
+                "last_ok": hs.last_ok,
+            }
+            for hid, hs in self._host_status.items()
+        }
 
     # ------------------------------------------------------------------ ports
 
@@ -92,46 +167,162 @@ class SessionManager:
             self._allocated_ports.discard(port)
             self._port_pool.append(port)
 
+    # ---------------------------------------------------------- tmux commands
+
+    async def _run_tmux(self, host_id: str, *args: str) -> tuple[int, str]:
+        """Run a tmux subcommand on a host.  Returns (returncode, stdout).
+
+        Local hosts use the resolved tmux binary path directly.
+        SSH hosts run through ``ssh -o BatchMode=yes`` with a connect timeout.
+        """
+        host = self._host_config.get_host(host_id)
+        if host is None:
+            return 1, ""
+
+        if host["type"] == "local":
+            proc = await asyncio.create_subprocess_exec(
+                self._tmux_path,
+                *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await proc.communicate()
+        else:
+            proc = await asyncio.create_subprocess_exec(
+                self._ssh_path,
+                "-o", "BatchMode=yes",
+                "-o", f"ConnectTimeout={SSH_CONNECT_TIMEOUT}",
+                host["ssh_alias"],
+                "tmux", *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                stdout, _ = await asyncio.wait_for(
+                    proc.communicate(), timeout=SSH_CONNECT_TIMEOUT + 15
+                )
+            except asyncio.TimeoutError:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                return 1, ""
+
+        return proc.returncode, stdout.decode(errors="replace").strip()
+
     # ---------------------------------------------------------- tmux polling
 
     async def poll_sessions(self) -> None:
-        """Reconcile the session registry against live tmux output.
+        """Reconcile session registries for all enabled hosts.
 
         Never raises — callers depend on this contract to keep the poll loop
         alive across transient failures.
         """
-        try:
-            await self._poll_sessions_inner()
-        except Exception:
-            log.exception("Unexpected error during poll_sessions")
+        self._sync_host_structures()
+        for host in self._host_config.list_hosts():
+            if not host.get("enabled", True):
+                continue
+            try:
+                await self._poll_host_sessions(host["id"])
+            except Exception:
+                log.exception("Unexpected error polling host %s", host["id"])
+                hs = self._host_status.get(host["id"])
+                if hs:
+                    hs.status = "error"
+                    hs.message = "Unexpected polling error"
 
-    async def _poll_sessions_inner(self) -> None:
-        proc = await asyncio.create_subprocess_exec(
-            self._tmux_path,
-            "list-sessions",
-            "-F",
-            "#{session_name}|#{session_windows}|#{session_attached}|#{session_created}",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await proc.communicate()
-
-        if proc.returncode != 0:
-            # tmux not running or no sessions — tear everything down.
-            if self.sessions:
-                log.info("tmux unavailable (rc=%d); clearing all sessions", proc.returncode)
-                for name in list(self.sessions):
-                    await self._kill_ttyd(name)
+    async def _poll_host_sessions(self, host_id: str) -> None:
+        """Reconcile the session registry for a single host."""
+        host = self._host_config.get_host(host_id)
+        if host is None:
             return
 
+        host_sessions = self._host_sessions.setdefault(host_id, {})
+        hs = self._host_status.setdefault(host_id, HostStatus())
+
+        fmt = "#{session_name}|#{session_windows}|#{session_attached}|#{session_created}"
+
+        # Run list-sessions.  For SSH hosts we need the raw returncode and stderr
+        # to classify connection failures, so we call subprocess directly rather
+        # than going through _run_tmux (which swallows stderr).
+        if host["type"] == "local":
+            proc = await asyncio.create_subprocess_exec(
+                self._tmux_path, "list-sessions", "-F", fmt,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout_bytes, stderr_bytes = await proc.communicate()
+            returncode = proc.returncode
+        else:
+            proc = await asyncio.create_subprocess_exec(
+                self._ssh_path,
+                "-o", "BatchMode=yes",
+                "-o", f"ConnectTimeout={SSH_CONNECT_TIMEOUT}",
+                host["ssh_alias"],
+                "tmux", "list-sessions", "-F", fmt,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                    proc.communicate(), timeout=SSH_CONNECT_TIMEOUT + 15
+                )
+                returncode = proc.returncode
+            except asyncio.TimeoutError:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                hs.status = "unreachable"
+                hs.message = "SSH connection timed out"
+                log.warning("SSH timeout polling host %s", host_id)
+                return
+
+        if returncode != 0:
+            if host["type"] == "ssh" and returncode == 255:
+                # SSH connection-level failure — classify error, keep stale data.
+                stderr_text = stderr_bytes.decode(errors="replace").strip()
+                if "permission denied" in stderr_text.lower():
+                    hs.status = "auth_error"
+                    hs.message = "SSH authentication failed"
+                else:
+                    hs.status = "unreachable"
+                    hs.message = stderr_text[:200] or "SSH connection failed"
+                log.warning(
+                    "SSH error polling host %s (rc=%d): %s",
+                    host_id, returncode, stderr_text[:200],
+                )
+                return  # preserve stale session data for display
+
+            # For everything else (local tmux gone, or remote tmux exited
+            # non-255), the host is reachable but has no sessions.
+            if host["type"] == "ssh":
+                hs.status = "ok"
+                hs.message = ""
+                hs.last_ok = time.monotonic()
+
+            if host_sessions:
+                log.info(
+                    "tmux unavailable on host %s (rc=%d); clearing sessions",
+                    host_id, returncode,
+                )
+                for name in list(host_sessions):
+                    await self._kill_ttyd(host_id, name)
+            return
+
+        # Success — host is reachable and tmux returned sessions.
+        hs.status = "ok"
+        hs.message = ""
+        hs.last_ok = time.monotonic()
+
         live: dict[str, dict] = {}
-        for line in stdout.decode().splitlines():
+        for line in stdout_bytes.decode(errors="replace").splitlines():
             line = line.strip()
             if not line:
                 continue
             parts = line.split("|", 3)
             if len(parts) != 4:
-                log.warning("Unexpected tmux output line: %r", line)
+                log.warning("Unexpected tmux output from host %s: %r", host_id, line)
                 continue
             name, windows_s, attached_s, created_s = parts
             try:
@@ -142,76 +333,85 @@ class SessionManager:
                     "created_epoch": int(created_s),
                 }
             except ValueError:
-                log.warning("Could not parse tmux line: %r", line)
+                log.warning(
+                    "Could not parse tmux line from host %s: %r", host_id, line
+                )
 
-        current = set(self.sessions)
+        current = set(host_sessions)
         incoming = set(live)
 
         # Sessions that disappeared.
         for gone in current - incoming:
-            await self._kill_ttyd(gone)
+            await self._kill_ttyd(host_id, gone)
 
         # Sessions that are new.
         for new in incoming - current:
             info = live[new]
-            self.sessions[new] = SessionInfo(
+            host_sessions[new] = SessionInfo(
+                host_id=host_id,
                 name=new,
                 windows=info["windows"],
                 attached=info["attached"],
                 created_epoch=info["created_epoch"],
             )
-            await self._spawn_ttyd(new)
+            await self._spawn_ttyd(host_id, new)
 
         # Existing sessions: update mutable fields and detect dead ttyd.
         for name in current & incoming:
             info = live[name]
-            sess = self.sessions[name]
+            sess = host_sessions[name]
             sess.windows = info["windows"]
             sess.attached = info["attached"]
             sess.created_epoch = info["created_epoch"]
             # Respawn ttyd if it died between polls.
             if sess._process is not None and sess._process.returncode is not None:
-                log.info("ttyd for session %r exited (rc=%d); respawning", name, sess._process.returncode)
+                log.info(
+                    "ttyd for %s/%s exited (rc=%d); respawning",
+                    host_id, name, sess._process.returncode,
+                )
                 if sess.port is not None:
                     self.release_port(sess.port)
                     sess.port = None
                 sess.ttyd_pid = None
                 sess._process = None
-                await self._spawn_ttyd(name)
+                await self._spawn_ttyd(host_id, name)
 
     # ------------------------------------------------------- pane discovery
 
-    async def get_panes(self, session_name: str) -> list[dict]:
-        """Return pane metadata for a session.
+    async def get_panes(self, host_id: str, session_name: str) -> list[dict]:
+        """Return pane metadata for a session on a host.
 
         The caller (server endpoint) is responsible for constructing ttyd_url
         using the returned port and the inbound request host.
         """
-        proc = await asyncio.create_subprocess_exec(
-            self._tmux_path,
-            "list-panes",
-            "-t", session_name,
-            "-F", "#{pane_id}|#{pane_index}|#{pane_width}|#{pane_height}|#{pane_active}|#{pane_title}",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        rc, stdout = await self._run_tmux(
+            host_id,
+            "list-panes", "-t", session_name,
+            "-F",
+            "#{pane_id}|#{pane_index}|#{pane_width}|#{pane_height}|#{pane_active}|#{pane_title}",
         )
-        stdout, stderr = await proc.communicate()
 
-        if proc.returncode != 0:
-            log.warning("tmux list-panes failed for %r: %s", session_name, stderr.decode().strip())
+        if rc != 0:
+            log.warning(
+                "tmux list-panes failed for %s/%s", host_id, session_name
+            )
             return []
 
-        sess = self.sessions.get(session_name)
+        host_sessions = self._host_sessions.get(host_id, {})
+        sess = host_sessions.get(session_name)
         port = sess.port if sess else None
 
         panes: list[dict] = []
-        for line in stdout.decode().splitlines():
+        for line in stdout.splitlines():
             line = line.strip()
             if not line:
                 continue
             parts = line.split("|", 5)
             if len(parts) != 6:
-                log.warning("Unexpected pane line for %r: %r", session_name, line)
+                log.warning(
+                    "Unexpected pane line for %s/%s: %r",
+                    host_id, session_name, line,
+                )
                 continue
             pane_id, index_s, width_s, height_s, active_s, title = parts
             try:
@@ -225,18 +425,17 @@ class SessionManager:
                     "port": port,
                 })
             except ValueError:
-                log.warning("Could not parse pane line for %r: %r", session_name, line)
+                log.warning(
+                    "Could not parse pane line for %s/%s: %r",
+                    host_id, session_name, line,
+                )
 
         return panes
 
     # ------------------------------------------------------- ttyd lifecycle
 
     async def _wait_for_port_ready(self, port: int, timeout: float = 3.0) -> bool:
-        """Block until *port* accepts a TCP connection, or *timeout* expires.
-
-        Used after spawning ttyd so callers (e.g. create_session) don't
-        return a ttyd_url that isn't listening yet.
-        """
+        """Block until *port* accepts a TCP connection, or *timeout* expires."""
         deadline = asyncio.get_event_loop().time() + timeout
         while asyncio.get_event_loop().time() < deadline:
             try:
@@ -251,16 +450,38 @@ class SessionManager:
                 await asyncio.sleep(0.1)
         return False
 
-    async def _spawn_ttyd(self, session_name: str) -> None:
+    async def _spawn_ttyd(self, host_id: str, session_name: str) -> None:
         """Allocate a port and start a ttyd process for the given session."""
         port = self.allocate_port()
         if port is None:
             log.warning(
-                "Port pool exhausted; session %r will not have a ttyd instance", session_name
+                "Port pool exhausted; %s/%s will not have a ttyd instance",
+                host_id, session_name,
             )
             return
 
-        base_path = f"/terminal/{urlquote(session_name, safe='')}/"
+        safe_host = urlquote(host_id, safe="")
+        safe_name = urlquote(session_name, safe="")
+        base_path = f"/terminal/{safe_host}/{safe_name}/"
+
+        host = self._host_config.get_host(host_id)
+        if host is None:
+            self.release_port(port)
+            return
+
+        # Build the attach command that ttyd will exec.
+        # Local:  <tmux_path> -u attach-session -t <name>
+        # SSH:    <ssh_path> <alias> tmux -u attach-session -t <name>
+        if host["type"] == "local":
+            attach_cmd = [
+                self._tmux_path, "-u", "attach-session", "-t", session_name,
+            ]
+        else:
+            attach_cmd = [
+                self._ssh_path, host["ssh_alias"],
+                "tmux", "-u", "attach-session", "-t", session_name,
+            ]
+
         cmd = [
             self._ttyd_path,
             "--port", str(port),
@@ -268,11 +489,10 @@ class SessionManager:
             "--writable",
             "--base-path", base_path,
             "-t", f"fontFamily={TTYD_FONT_FAMILY}",
-            self._tmux_path, "-u", "attach-session", "-t", session_name,
+            *attach_cmd,
         ]
 
-        # Ensure the child process (and tmux client) sees a UTF-8 locale
-        # so that wide/Nerd-Font glyphs are transmitted correctly.
+        # Ensure the child process sees a UTF-8 locale.
         env = os.environ.copy()
         env.setdefault("LANG", "en_US.UTF-8")
         env.setdefault("LC_ALL", "en_US.UTF-8")
@@ -285,29 +505,52 @@ class SessionManager:
                 stderr=asyncio.subprocess.PIPE,
             )
         except FileNotFoundError:
-            log.error("ttyd binary not found (%r); session %r will have no terminal", self._ttyd_path, session_name)
+            log.error(
+                "ttyd binary not found (%r); %s/%s will have no terminal",
+                self._ttyd_path, host_id, session_name,
+            )
             self.release_port(port)
             return
         except Exception:
-            log.exception("Failed to spawn ttyd for session %r on port %d", session_name, port)
+            log.exception(
+                "Failed to spawn ttyd for %s/%s on port %d",
+                host_id, session_name, port,
+            )
             self.release_port(port)
             return
 
-        sess = self.sessions[session_name]
+        host_sessions = self._host_sessions.get(host_id, {})
+        sess = host_sessions.get(session_name)
+        if sess is None:
+            # Session removed between port allocation and spawn — clean up.
+            process.kill()
+            self.release_port(port)
+            return
+
         sess.port = port
         sess.ttyd_pid = process.pid
         sess._process = process
-        log.info("Spawned ttyd for session %r on port %d (pid=%d)", session_name, port, process.pid)
+        log.info(
+            "Spawned ttyd for %s/%s on port %d (pid=%d)",
+            host_id, session_name, port, process.pid,
+        )
 
-    async def _kill_ttyd(self, session_name: str) -> None:
+    async def _kill_ttyd(self, host_id: str, session_name: str) -> None:
         """Terminate the ttyd process for a session and reclaim its port.
 
-        Removes the session from the registry unconditionally — the caller
-        should not reference session_name after this returns.
+        Removes the session from the host registry unconditionally.
         """
-        sess = self.sessions.pop(session_name, None)
+        host_sessions = self._host_sessions.get(host_id)
+        if host_sessions is None:
+            return
 
-        self._snapshot_cache.pop(session_name, None)
+        sess = host_sessions.pop(session_name, None)
+
+        # Clean snapshot cache for this session.
+        host_cache = self._snapshot_cache.get(host_id)
+        if host_cache:
+            host_cache.pop(session_name, None)
+
         if sess is None:
             return
 
@@ -327,26 +570,30 @@ class SessionManager:
         try:
             await asyncio.wait_for(proc.wait(), timeout=5.0)
         except asyncio.TimeoutError:
-            log.warning("ttyd for session %r did not exit after SIGTERM; sending SIGKILL", session_name)
+            log.warning(
+                "ttyd for %s/%s did not exit after SIGTERM; sending SIGKILL",
+                host_id, session_name,
+            )
             try:
                 proc.kill()
             except ProcessLookupError:
                 pass
             await proc.wait()
 
-        log.info("Killed ttyd for session %r (pid=%s)", session_name, sess.ttyd_pid)
+        log.info(
+            "Killed ttyd for %s/%s (pid=%s)", host_id, session_name, sess.ttyd_pid
+        )
 
     async def _kill_stale_ttyd(self) -> None:
         """Kill orphaned ttyd processes left over from a previous server run.
 
         Must be called before the first poll so freed ports are available
-        in the pool.  Matches only ttyd processes that were spawned with
-        `tmux attach-session` (our unique command-line signature).
+        in the pool.  Matches ttyd processes that were spawned with
+        ``attach-session`` (our unique command-line signature).
         """
         try:
-            # Find orphaned ttyd processes from a prior run.
             proc = await asyncio.create_subprocess_exec(
-                "pkill", "-f", "ttyd.*tmux attach-session",
+                "pkill", "-f", "ttyd.*attach-session",
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
@@ -358,21 +605,15 @@ class SessionManager:
         except FileNotFoundError:
             log.debug("pkill not available; skipping orphan cleanup")
 
+    # ------------------------------------------------------- layout helpers
 
-    async def _run_tmux(self, *args: str) -> tuple[int, str]:
-        """Run a tmux subcommand and return (returncode, stdout_stripped)."""
-        proc = await asyncio.create_subprocess_exec(
-            self._tmux_path, *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, _ = await proc.communicate()
-        return proc.returncode, stdout.decode().strip()
-
-    async def _apply_row_layout(self, session_name: str, counts: list[int]) -> bool:
-        """Port of beamux apply_row_layout. Split rows first, then columns per row."""
+    async def _apply_row_layout(
+        self, host_id: str, session_name: str, counts: list[int]
+    ) -> bool:
+        """Split rows first, then columns per row."""
         rc, pane_id = await self._run_tmux(
-            "display-message", "-p", "-t", f"{session_name}:0.0", "#{pane_id}"
+            host_id,
+            "display-message", "-p", "-t", f"{session_name}:0.0", "#{pane_id}",
         )
         if rc != 0:
             return False
@@ -380,33 +621,42 @@ class SessionManager:
         n_rows = len(counts)
         row_anchors: list[str] = [pane_id]
 
-        # Create additional rows by splitting vertically.
         for _ in range(1, n_rows):
             rc, new_pane = await self._run_tmux(
-                "split-window", "-v", "-t", f"{session_name}:0", "-P", "-F", "#{pane_id}"
+                host_id,
+                "split-window", "-v", "-t", f"{session_name}:0",
+                "-P", "-F", "#{pane_id}",
             )
             if rc != 0:
                 return False
             row_anchors.append(new_pane)
 
-        rc, _ = await self._run_tmux("select-layout", "-t", f"{session_name}:0", "even-vertical")
+        rc, _ = await self._run_tmux(
+            host_id, "select-layout", "-t", f"{session_name}:0", "even-vertical"
+        )
         if rc != 0:
             return False
 
-        # For each row, split horizontally counts[r]-1 times.
         for r, anchor in enumerate(row_anchors):
             for _ in range(counts[r] - 1):
-                rc, _ = await self._run_tmux("split-window", "-h", "-t", anchor)
+                rc, _ = await self._run_tmux(
+                    host_id, "split-window", "-h", "-t", anchor
+                )
                 if rc != 0:
                     return False
 
-        await self._run_tmux("select-pane", "-t", f"{session_name}:0.0")
+        await self._run_tmux(
+            host_id, "select-pane", "-t", f"{session_name}:0.0"
+        )
         return True
 
-    async def _apply_col_layout(self, session_name: str, counts: list[int]) -> bool:
+    async def _apply_col_layout(
+        self, host_id: str, session_name: str, counts: list[int]
+    ) -> bool:
         """Mirror of _apply_row_layout with columns as the primary split axis."""
         rc, pane_id = await self._run_tmux(
-            "display-message", "-p", "-t", f"{session_name}:0.0", "#{pane_id}"
+            host_id,
+            "display-message", "-p", "-t", f"{session_name}:0.0", "#{pane_id}",
         )
         if rc != 0:
             return False
@@ -414,32 +664,38 @@ class SessionManager:
         n_cols = len(counts)
         col_anchors: list[str] = [pane_id]
 
-        # Create additional columns by splitting horizontally.
         for _ in range(1, n_cols):
             rc, new_pane = await self._run_tmux(
-                "split-window", "-h", "-t", f"{session_name}:0", "-P", "-F", "#{pane_id}"
+                host_id,
+                "split-window", "-h", "-t", f"{session_name}:0",
+                "-P", "-F", "#{pane_id}",
             )
             if rc != 0:
                 return False
             col_anchors.append(new_pane)
 
-        rc, _ = await self._run_tmux("select-layout", "-t", f"{session_name}:0", "even-horizontal")
+        rc, _ = await self._run_tmux(
+            host_id, "select-layout", "-t", f"{session_name}:0", "even-horizontal"
+        )
         if rc != 0:
             return False
 
-        # For each column, split vertically counts[c]-1 times.
         for c, anchor in enumerate(col_anchors):
             for _ in range(counts[c] - 1):
-                rc, _ = await self._run_tmux("split-window", "-v", "-t", anchor)
+                rc, _ = await self._run_tmux(
+                    host_id, "split-window", "-v", "-t", anchor
+                )
                 if rc != 0:
                     return False
 
-        await self._run_tmux("select-pane", "-t", f"{session_name}:0.0")
+        await self._run_tmux(
+            host_id, "select-pane", "-t", f"{session_name}:0.0"
+        )
         return True
 
     @staticmethod
     def _parse_layout_spec(spec: str) -> list[int] | None:
-        """Parse colon-separated positive integers. Returns None on invalid input."""
+        """Parse colon-separated positive integers.  Returns None on invalid."""
         try:
             counts = [int(x) for x in spec.split(":")]
             if counts and all(c >= 1 for c in counts):
@@ -448,21 +704,36 @@ class SessionManager:
             pass
         return None
 
+    # ------------------------------------------------------- session CRUD
+
     async def create_session(
         self,
+        host_id: str,
         name: str,
         cwd: str | None = None,
         layout_type: str | None = None,
         layout_spec: str | None = None,
     ) -> dict:
-        """Create a new tmux session. Returns session info dict on success, or {\"error\": \"...\"} on failure."""
-        if not SESSION_NAME_RE.match(name):
-            return {"error": f"Invalid session name {name!r}: must match ^[A-Za-z0-9_-]+$"}
+        """Create a new tmux session on a host.
 
-        if name in self.sessions:
+        Returns session info dict on success, or ``{"error": "..."}`` on failure.
+        """
+        if not SESSION_NAME_RE.match(name):
+            return {
+                "error": f"Invalid session name {name!r}: must match ^[A-Za-z0-9_-]+$"
+            }
+
+        host = self._host_config.get_host(host_id)
+        if host is None:
+            return {"error": f"Unknown host: {host_id}"}
+
+        host_sessions = self._host_sessions.get(host_id, {})
+        if name in host_sessions:
             return {"error": f"Session {name!r} already exists"}
 
-        if cwd is not None:
+        # Validate cwd — local paths are checked on disk; remote paths are
+        # passed through to the remote tmux (no local validation possible).
+        if cwd is not None and host["type"] == "local":
             cwd = os.path.expanduser(cwd)
             if not os.path.isdir(cwd):
                 return {"error": f"cwd {cwd!r} is not a directory"}
@@ -470,73 +741,87 @@ class SessionManager:
         counts: list[int] | None = None
         if layout_type is not None:
             if layout_type not in ("row", "col"):
-                return {"error": f"Invalid layout_type {layout_type!r}: must be 'row' or 'col'"}
+                return {
+                    "error": f"Invalid layout_type {layout_type!r}: must be 'row' or 'col'"
+                }
             if not layout_spec:
-                return {"error": "layout_spec is required when layout_type is provided"}
+                return {
+                    "error": "layout_spec is required when layout_type is provided"
+                }
             counts = self._parse_layout_spec(layout_spec)
             if counts is None:
-                return {"error": f"Invalid layout_spec {layout_spec!r}: must be colon-separated positive integers"}
+                return {
+                    "error": f"Invalid layout_spec {layout_spec!r}: must be colon-separated positive integers"
+                }
 
-        cmd = [self._tmux_path, "new-session", "-d", "-s", name]
+        tmux_args = ["new-session", "-d", "-s", name]
         if cwd is not None:
-            cmd += ["-c", cwd]
+            tmux_args += ["-c", cwd]
 
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await proc.communicate()
-        if proc.returncode != 0:
-            return {"error": f"tmux new-session failed: {stderr.decode().strip()}"}
+        rc, output = await self._run_tmux(host_id, *tmux_args)
+        if rc != 0:
+            return {"error": f"tmux new-session failed: {output}"}
 
         if layout_type is not None and counts is not None:
             ok = await (
-                self._apply_row_layout(name, counts)
+                self._apply_row_layout(host_id, name, counts)
                 if layout_type == "row"
-                else self._apply_col_layout(name, counts)
+                else self._apply_col_layout(host_id, name, counts)
             )
             if not ok:
-                log.warning("Layout application failed for session %r", name)
+                log.warning("Layout application failed for %s/%s", host_id, name)
 
-        await self.poll_sessions()
+        await self._poll_host_sessions(host_id)
 
-        sess = self.sessions.get(name)
+        sess = self._host_sessions.get(host_id, {}).get(name)
         if sess is None:
-            return {"error": f"Session {name!r} was created but not found after polling"}
+            return {
+                "error": f"Session {name!r} was created but not found after polling"
+            }
 
-        # Block until ttyd is actually accepting connections so the caller
-        # can hand the ttyd_url to the frontend without a race.
+        # Block until ttyd is actually accepting connections.
         if sess.port is not None:
             ready = await self._wait_for_port_ready(sess.port)
             if not ready:
-                log.warning("ttyd for session %r not ready within timeout", name)
+                log.warning("ttyd for %s/%s not ready within timeout", host_id, name)
 
+        safe_host = urlquote(host_id, safe="")
+        safe_name = urlquote(name, safe="")
         return {
             "name": sess.name,
+            "host_id": host_id,
             "windows": sess.windows,
             "attached": sess.attached,
             "created_epoch": sess.created_epoch,
-            "ttyd_url": f"/terminal/{urlquote(name, safe='')}/",
+            "ttyd_url": f"/terminal/{safe_host}/{safe_name}/",
         }
 
-    async def delete_session(self, name: str) -> dict:
-        """Kill a tmux session and release its ttyd process/port."""
-        if name not in self.sessions:
+    async def delete_session(self, host_id: str, name: str) -> dict:
+        """Kill a tmux session on a host and release its ttyd process/port."""
+        host_sessions = self._host_sessions.get(host_id, {})
+        if name not in host_sessions:
             return {"error": f"Session '{name}' not found"}
 
-        attached = self.sessions[name].attached
+        attached = host_sessions[name].attached
 
-        returncode, stdout = await self._run_tmux("kill-session", "-t", name)
-        if returncode != 0:
-            return {"error": f"tmux kill-session failed: {stdout}"}
+        rc, output = await self._run_tmux(host_id, "kill-session", "-t", name)
+        if rc != 0:
+            return {"error": f"tmux kill-session failed: {output}"}
 
-        await self._kill_ttyd(name)
+        await self._kill_ttyd(host_id, name)
 
-        return {"name": name, "deleted": True, "was_attached": attached}
+        return {
+            "name": name,
+            "host_id": host_id,
+            "deleted": True,
+            "was_attached": attached,
+        }
 
     def list_directories(self, prefix: str, limit: int = 50) -> list[str]:
-        """List directories matching prefix for path autocompletion."""
+        """List directories matching prefix for path autocompletion.
+
+        Only meaningful for localhost — remote path completion is not supported.
+        """
         if not prefix:
             prefix = os.path.expanduser("~/")
         prefix = os.path.expanduser(prefix)
@@ -572,20 +857,24 @@ class SessionManager:
     # --------------------------------------------------------- cleanup hook
 
     async def cleanup(self) -> None:
-        """Kill all managed ttyd processes. Call on server shutdown."""
+        """Kill all managed ttyd processes.  Call on server shutdown."""
         await self.stop_polling()
-        for name in list(self.sessions):
-            await self._kill_ttyd(name)
+        for host_id in list(self._host_sessions):
+            for name in list(self._host_sessions[host_id]):
+                await self._kill_ttyd(host_id, name)
 
     # --------------------------------------------------------- polling loop
 
     async def start_polling(self, get_client_count: Callable[[], int]) -> None:
         """Run the reconciliation loop until cancelled."""
+
         async def _loop() -> None:
             while True:
                 await self.poll_sessions()
                 interval = (
-                    POLL_INTERVAL_ACTIVE if get_client_count() > 0 else POLL_INTERVAL_IDLE
+                    POLL_INTERVAL_ACTIVE
+                    if get_client_count() > 0
+                    else POLL_INTERVAL_IDLE
                 )
                 await asyncio.sleep(interval)
 
@@ -606,13 +895,15 @@ class SessionManager:
 
     # -------------------------------------------------- session list for API
 
-    def get_sessions(self, page: int = 1, page_size: int = SESSION_PAGE_SIZE) -> dict:
-        """Return a paginated session list matching the API contract."""
-        all_sessions = sorted(self.sessions.values(), key=lambda s: s.name)
+    def get_sessions(
+        self, host_id: str, page: int = 1, page_size: int = SESSION_PAGE_SIZE
+    ) -> dict:
+        """Return a paginated session list for a specific host."""
+        host_sessions = self._host_sessions.get(host_id, {})
+        all_sessions = sorted(host_sessions.values(), key=lambda s: s.name)
         total = len(all_sessions)
         pages = math.ceil(total / page_size) if total else 1
 
-        # Clamp page to valid range so callers always get a coherent response.
         page = max(1, min(page, pages))
         start = (page - 1) * page_size
         slice_ = all_sessions[start : start + page_size]
@@ -621,6 +912,7 @@ class SessionManager:
             "sessions": [
                 {
                     "name": s.name,
+                    "host_id": s.host_id,
                     "windows": s.windows,
                     "attached": s.attached,
                     "created_epoch": s.created_epoch,
@@ -634,52 +926,43 @@ class SessionManager:
             "pages": pages,
         }
 
-
     # --------------------------------------------------- session thumbnails
 
-    async def get_thumbnail_svg(self, session_name: str) -> str | None:
-        """Return an SVG thumbnail for the session, or None if unknown.
-
-        Uses a cached snapshot if fresher than SNAPSHOT_FRESHNESS_SECS;
-        otherwise re-captures from tmux.
-        """
-        if session_name not in self.sessions:
+    async def get_thumbnail_svg(
+        self, host_id: str, session_name: str
+    ) -> str | None:
+        """Return an SVG thumbnail for the session, or None if unknown."""
+        host_sessions = self._host_sessions.get(host_id, {})
+        if session_name not in host_sessions:
             return None
 
-        cached = self._snapshot_cache.get(session_name)
+        host_cache = self._snapshot_cache.setdefault(host_id, {})
+        cached = host_cache.get(session_name)
         if cached is not None:
             text, ts = cached
             if time.monotonic() - ts < SNAPSHOT_FRESHNESS_SECS:
                 return self._render_svg(text)
 
-        text = await self._capture_pane(session_name)
+        text = await self._capture_pane(host_id, session_name)
         if text is None:
-            # Capture failed — return stale cache if available, else a fallback.
+            # Capture failed — return stale cache if available, else fallback.
             if cached is not None:
                 return self._render_svg(cached[0])
             return self._render_svg("(no snapshot available)")
 
-        self._snapshot_cache[session_name] = (text, time.monotonic())
+        host_cache[session_name] = (text, time.monotonic())
         return self._render_svg(text)
 
-    async def _capture_pane(self, session_name: str) -> str | None:
+    async def _capture_pane(
+        self, host_id: str, session_name: str
+    ) -> str | None:
         """Run tmux capture-pane and return cleaned text, or None on failure."""
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                self._tmux_path,
-                "capture-pane", "-p", "-t", session_name,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5.0)
-        except (asyncio.TimeoutError, FileNotFoundError, OSError) as exc:
-            log.warning("capture-pane failed for %r: %s", session_name, exc)
+        rc, raw = await self._run_tmux(
+            host_id, "capture-pane", "-p", "-t", session_name
+        )
+        if rc != 0:
             return None
 
-        if proc.returncode != 0:
-            return None
-
-        raw = stdout.decode(errors="replace")
         # Strip ANSI escape sequences.
         cleaned = _ANSI_RE.sub("", raw)
         # Truncate to max dimensions for a compact thumbnail.
@@ -696,7 +979,7 @@ class SessionManager:
             lines.append("")
 
         char_w = 7.2  # approximate width of a monospace char at 12px
-        char_h = 16   # line height
+        char_h = 16  # line height
         pad_x = 10
         pad_y = 10
         width = int(SNAPSHOT_MAX_COLS * char_w + 2 * pad_x)
@@ -716,7 +999,8 @@ class SessionManager:
             f' width="{width}" height="{height}"'
             f' viewBox="0 0 {width} {height}">'
             f'<rect width="100%" height="100%" rx="6" fill="#1a1a2e"/>'
-            f'<g font-family="\'Hack Nerd Font\', \'Hack Nerd Font Mono\', Menlo, Consolas, monospace"'
+            f'<g font-family="\'Hack Nerd Font\', \'Hack Nerd Font Mono\','
+            f' Menlo, Consolas, monospace"'
             f' font-size="12" fill="#c8c8d0">'
             f'{body}'
             f'</g></svg>'
