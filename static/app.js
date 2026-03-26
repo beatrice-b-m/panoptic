@@ -1086,6 +1086,8 @@ function highlightCompletion(items) {
 // Layout preview
 // ---------------------------------------------------------------------------
 
+// Mirrors session_manager.py:_parse_layout_spec() for client-side preview.
+// Keep both in sync when changing the spec format.
 function parseLayoutSpec(spec) {
     if (!spec || !spec.trim()) return null;
     const segments = spec.split(':');

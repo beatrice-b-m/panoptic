@@ -735,6 +735,9 @@ class SessionManager:
     def _parse_layout_spec(spec: str) -> tuple[list[int], list[str]] | None:
         """Parse a Beamux-compatible layout spec.
 
+        NOTE: static/app.js:parseLayoutSpec() mirrors this grammar for
+        client-side preview.  Keep both in sync when changing the spec format.
+
         Segments are colon-separated.  Each segment is either:
           - a positive integer  (e.g. '2')  → that many panes, no default command
           - comma-separated commands (e.g. 'npm run dev,jest')  → one pane per command
