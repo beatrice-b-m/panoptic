@@ -234,21 +234,40 @@ class SessionManager:
     async def poll_sessions(self) -> None:
         """Reconcile session registries for all enabled hosts.
 
-        Never raises — callers depend on this contract to keep the poll loop
-        alive across transient failures.
+        Polls hosts concurrently (bounded to 4 at a time) to prevent
+        one slow/unreachable host from blocking updates for all others.
+        Never raises — callers depend on this contract.
         """
         self._sync_host_structures()
-        for host in self._host_config.list_hosts():
-            if not host.get("enabled", True):
-                continue
-            try:
-                await self._poll_host_sessions(host["id"])
-            except Exception:
-                log.exception("Unexpected error polling host %s", host["id"])
-                hs = self._host_status.get(host["id"])
-                if hs:
-                    hs.status = "error"
-                    hs.message = "Unexpected polling error"
+        hosts = [
+            h for h in self._host_config.list_hosts()
+            if h.get("enabled", True)
+        ]
+        if not hosts:
+            return
+
+        sem = asyncio.Semaphore(4)  # Bound concurrent SSH sessions.
+        poll_start = time.monotonic()
+
+        async def _poll_one(host: dict) -> None:
+            async with sem:
+                try:
+                    await self._poll_host_sessions(host["id"])
+                except Exception:
+                    log.exception("Unexpected error polling host %s", host["id"])
+                    hs = self._host_status.get(host["id"])
+                    if hs:
+                        hs.status = "error"
+                        hs.message = "Unexpected polling error"
+
+        await asyncio.gather(*[_poll_one(h) for h in hosts])
+
+        elapsed = time.monotonic() - poll_start
+        if elapsed > 2.0:
+            log.debug(
+                "Poll cycle completed in %.1fs across %d host(s)",
+                elapsed, len(hosts),
+            )
 
     async def _poll_host_sessions(self, host_id: str) -> None:
         """Reconcile the session registry for a single host."""
@@ -550,7 +569,9 @@ class SessionManager:
 
         proc = sess._process
         if proc is None or proc.returncode is not None:
-            # Already dead.
+            # Already dead — still clean up PID tracking.
+            if sess.ttyd_pid is not None:
+                self._remove_ttyd_pid(sess.ttyd_pid)
             return
 
         try:

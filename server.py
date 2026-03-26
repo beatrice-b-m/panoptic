@@ -17,7 +17,7 @@ import ssl
 import time
 import socket
 from pathlib import Path
-from urllib.parse import quote as urlquote
+from urllib.parse import quote as urlquote, urlparse
 
 import aiohttp
 from aiohttp import web
@@ -64,11 +64,87 @@ async def security_headers_middleware(request: web.Request, handler):
     response = await handler(request)
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    # CSP: allow self + inline styles (for ttyd) + ws/wss for terminal connections
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+        "connect-src 'self' ws: wss:; img-src 'self' data:; font-src 'self' data:;",
+    )
     if request.app.get("_tls_enabled"):
         response.headers.setdefault(
             "Strict-Transport-Security", "max-age=63072000; includeSubDomains"
         )
     return response
+
+
+
+@web.middleware
+async def origin_validation_middleware(request: web.Request, handler):
+    """Reject cross-origin state-changing requests.
+
+    Validates that Origin (or Referer) matches the Host header for
+    POST/PUT/PATCH/DELETE and WebSocket upgrades.  Requests with no
+    Origin header are allowed (same-origin browser requests may omit it).
+    """
+    is_upgrade = request.headers.get("Upgrade", "").lower() == "websocket"
+    is_mutating = request.method in ("POST", "PUT", "PATCH", "DELETE")
+
+    if not is_upgrade and not is_mutating:
+        return await handler(request)
+
+    origin = request.headers.get("Origin")
+    if origin is None:
+        # Fall back to Referer.
+        referer = request.headers.get("Referer")
+        if referer:
+            parsed = urlparse(referer)
+            origin = f"{parsed.scheme}://{parsed.netloc}" if parsed.netloc else None
+
+    if origin is None:
+        # No origin info at all — likely a same-origin request or a non-browser client.
+        return await handler(request)
+
+    # Extract the host portion from Origin and compare to the Host header.
+    origin_parsed = urlparse(origin)
+    origin_host = origin_parsed.hostname or ""
+    origin_port = origin_parsed.port
+
+    request_host_header = request.host  # "host:port" or just "host"
+    # Parse the Host header.
+    if ":" in request_host_header:
+        req_host, req_port_s = request_host_header.rsplit(":", 1)
+        try:
+            req_port = int(req_port_s)
+        except ValueError:
+            req_host = request_host_header
+            req_port = None
+    else:
+        req_host = request_host_header
+        req_port = None
+
+    # Normalize localhost variants.
+    _LOCALHOST = frozenset({"localhost", "127.0.0.1", "::1"})
+    o_host = origin_host.lower()
+    r_host = req_host.lower()
+    hosts_match = (o_host == r_host) or (o_host in _LOCALHOST and r_host in _LOCALHOST)
+
+    # Port comparison: if origin port is None, use scheme default.
+    if origin_port is None:
+        origin_port = 443 if origin_parsed.scheme == "https" else 80
+
+    ports_match = (origin_port == req_port) or (req_port is None)
+
+    if hosts_match and ports_match:
+        return await handler(request)
+
+    log.warning(
+        "Rejected cross-origin %s request: Origin=%s Host=%s",
+        request.method, origin, request_host_header,
+    )
+    return web.json_response(
+        {"error": "Cross-origin request rejected"}, status=403
+    )
 
 # ---------------------------------------------------------------------------
 # Request body validation helpers
@@ -905,6 +981,7 @@ async def on_cleanup(app: web.Application) -> None:
 def build_app(settings: RuntimeSettings) -> web.Application:
     app = web.Application(middlewares=[
         client_tracking_middleware,
+        origin_validation_middleware,
         security_headers_middleware,
     ])
     app["settings"] = settings

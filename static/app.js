@@ -17,6 +17,7 @@ const _cardMap = new Map();
 
 // Fetch sequence counter — prevents stale responses from overwriting newer UI.
 let _fetchSeq = 0;
+let _terminalLoadEpoch = 0;
 
 // Pending delete state for the confirmation modal.
 let _pendingDelete = null;  // { name, attached, source: 'gallery'|'session' }
@@ -387,10 +388,14 @@ function createCard(session) {
         e.stopPropagation();
         toggleCardMenu(card);
     });
-    card.querySelector('.card-delete-btn').addEventListener('click', (e) => {
+    const delBtn = card.querySelector('.card-delete-btn');
+    delBtn.dataset.sessionName = session.name;
+    delBtn.dataset.attached = session.attached ? '1' : '';
+    delBtn.addEventListener('click', (e) => {
         e.stopPropagation();
         closeAllMenus();
-        requestSessionDelete(session.name, session.attached, 'gallery');
+        const btn = e.currentTarget;
+        requestSessionDelete(btn.dataset.sessionName, btn.dataset.attached === '1', 'gallery');
     });
 
     return card;
@@ -420,15 +425,11 @@ function updateCard(card, session) {
         }
     }
 
+    // Update data attributes for event delegation instead of cloning.
     const deleteBtn = card.querySelector('.card-delete-btn');
     if (deleteBtn) {
-        const fresh = deleteBtn.cloneNode(true);
-        fresh.addEventListener('click', (e) => {
-            e.stopPropagation();
-            closeAllMenus();
-            requestSessionDelete(session.name, session.attached, 'gallery');
-        });
-        deleteBtn.replaceWith(fresh);
+        deleteBtn.dataset.sessionName = session.name;
+        deleteBtn.dataset.attached = session.attached ? '1' : '';
     }
 }
 
@@ -483,12 +484,17 @@ async function loadSessionTerminal(sessionName) {
         _terminalHandle = null;
     }
 
+    const loadEpoch = ++_terminalLoadEpoch;
     const container = document.getElementById('terminal-container');
     const hostId = encodeURIComponent(currentHostId);
     const safeName = encodeURIComponent(sessionName);
 
     try {
         const resp = await fetch(`/api/hosts/${hostId}/sessions/${safeName}`);
+
+        // Stale response — user navigated away or opened a different session.
+        if (loadEpoch !== _terminalLoadEpoch) return;
+
         if (!resp.ok) {
             showBanner(
                 resp.status === 404
@@ -500,6 +506,9 @@ async function loadSessionTerminal(sessionName) {
 
         const data = await resp.json();
 
+        // Check again after JSON parse (another await boundary).
+        if (loadEpoch !== _terminalLoadEpoch) return;
+
         if (!data.ttyd_url) {
             showBanner(`Session "${sessionName}" has no terminal available (port not assigned).`);
             return;
@@ -508,12 +517,14 @@ async function loadSessionTerminal(sessionName) {
         hideBanner();
         _terminalHandle = createTerminal(container, data.ttyd_url);
     } catch (err) {
+        if (loadEpoch !== _terminalLoadEpoch) return;
         showBanner(`Failed to connect to session: ${err.message}`);
     }
 }
 
 function closeSession() {
     currentSession = null;
+    _terminalLoadEpoch++;  // Invalidate any in-flight loadSessionTerminal.
     closeAllMenus();
 
     if (_terminalHandle) {
