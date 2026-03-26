@@ -14,7 +14,7 @@
     /* Borders */
     --border-default: hsl(217, 25%, 28%);
     --border-subtle: hsl(217, 30%, 22%);
-    --border-accent: hsla(159, 34%, 46%, 0.25);
+    --border-accent: hsla(6, 98%, 72%, 0.25);
 
     /* Text */
     --text-primary: hsl(215, 20%, 92%);
@@ -22,10 +22,10 @@
     --text-tertiary: hsl(215, 10%, 42%);
     --text-inverse: hsl(217, 51%, 14%);
 
-    /* Accent (green) */
-    --accent: hsl(159, 34%, 46%);
-    --accent-hover: hsl(159, 34%, 54%);
-    --accent-muted: hsla(159, 34%, 46%, 0.14);
+    /* Accent (coral) */
+    --accent: hsl(6, 98%, 72%);
+    --accent-hover: hsl(6, 90%, 78%);
+    --accent-muted: hsla(6, 98%, 72%, 0.14);
 
     /* Status */
     --status-on: hsl(159, 34%, 46%);
@@ -74,16 +74,16 @@
 
     --border-default: hsl(20, 5%, 83%);
     --border-subtle: hsl(20, 5%, 89%);
-    --border-accent: hsla(159, 40%, 38%, 0.25);
+    --border-accent: hsla(21, 95%, 55%, 0.25);
 
     --text-primary: hsl(217, 35%, 18%);
     --text-secondary: hsl(217, 15%, 45%);
     --text-tertiary: hsl(217, 10%, 62%);
     --text-inverse: hsl(0, 0%, 100%);
 
-    --accent: hsl(159, 40%, 38%);
-    --accent-hover: hsl(159, 40%, 32%);
-    --accent-muted: hsla(159, 40%, 38%, 0.12);
+    --accent: hsl(21, 95%, 55%);
+    --accent-hover: hsl(21, 95%, 48%);
+    --accent-muted: hsla(21, 95%, 55%, 0.12);
 
     --status-on: hsl(159, 40%, 38%);
     --status-on-glow: hsla(159, 40%, 38%, 0.35);
