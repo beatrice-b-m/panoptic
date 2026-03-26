@@ -71,6 +71,86 @@ async def security_headers_middleware(request: web.Request, handler):
     return response
 
 # ---------------------------------------------------------------------------
+# Request body validation helpers
+# ---------------------------------------------------------------------------
+
+
+class _ValidationError(Exception):
+    """Raised by validation helpers to produce a clean 4xx response."""
+    def __init__(self, message: str, status: int = 400) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+def _require_str(body: dict, field: str, *, strip: bool = True) -> str:
+    """Extract a required non-empty string field from a JSON body.
+
+    Raises _ValidationError on type mismatch or empty value.
+    """
+    value = body.get(field)
+    if value is None or not isinstance(value, str):
+        raise _ValidationError(f"'{field}' must be a non-empty string", 400)
+    if strip:
+        value = value.strip()
+    if not value:
+        raise _ValidationError(f"'{field}' is required", 400)
+    return value
+
+
+def _optional_str(body: dict, field: str, default: str = "", *, strip: bool = True) -> str:
+    """Extract an optional string field; returns *default* when absent or empty."""
+    value = body.get(field)
+    if value is None:
+        return default
+    if not isinstance(value, str):
+        raise _ValidationError(f"'{field}' must be a string", 400)
+    return value.strip() if strip else value
+
+
+def _optional_str_or_none(body: dict, field: str, *, strip: bool = True) -> str | None:
+    """Extract an optional string field; returns None when absent or falsy."""
+    value = body.get(field)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise _ValidationError(f"'{field}' must be a string", 400)
+    cleaned = value.strip() if strip else value
+    return cleaned or None
+
+
+def _require_str_list(body: dict, field: str) -> list[str]:
+    """Extract a field that must be a list of strings.
+
+    Returns [] when the field is absent.
+    """
+    value = body.get(field)
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise _ValidationError(f"'{field}' must be an array", 400)
+    for i, item in enumerate(value):
+        if not isinstance(item, str):
+            raise _ValidationError(f"'{field}[{i}]' must be a string", 400)
+    return value
+
+
+def _require_str_dict(body: dict, field: str) -> dict[str, str]:
+    """Extract a field that must be a dict with string keys and string values.
+
+    Returns {} when the field is absent.
+    """
+    value = body.get(field, {})
+    if not isinstance(value, dict):
+        raise _ValidationError(f"'{field}' must be an object", 400)
+    for k, v in value.items():
+        if not isinstance(k, str) or not isinstance(v, str):
+            raise _ValidationError(
+                f"'{field}' must have string keys and string values", 400
+            )
+    return value
+
+
+# ---------------------------------------------------------------------------
 # API routes — hosts
 # ---------------------------------------------------------------------------
 
@@ -121,15 +201,11 @@ async def handle_add_host(request: web.Request) -> web.Response:
     except Exception:
         return web.json_response({"error": "Invalid JSON body"}, status=400)
 
-    label = body.get("label", "").strip()
-    ssh_alias = body.get("ssh_alias", "").strip()
-
-    if not label:
-        return web.json_response({"error": "'label' is required"}, status=400)
-    if not ssh_alias:
-        return web.json_response(
-            {"error": "'ssh_alias' is required"}, status=400
-        )
+    try:
+        label = _require_str(body, "label")
+        ssh_alias = _require_str(body, "ssh_alias")
+    except _ValidationError as exc:
+        return web.json_response({"error": str(exc)}, status=exc.status)
 
     try:
         entry = host_config.add_host(label, ssh_alias)
@@ -274,14 +350,14 @@ async def handle_create_session(request: web.Request) -> web.Response:
     except Exception:
         return web.json_response({"error": "Invalid JSON body"}, status=400)
 
-    name = body.get("name", "").strip()
-    if not name:
-        return web.json_response({"error": "'name' is required"}, status=400)
-
-    cwd = body.get("cwd") or None
-    layout_type = body.get("layout_type") or None
-    layout_spec = body.get("layout_spec") or None
-    pane_commands = body.get("pane_commands") or None
+    try:
+        name = _require_str(body, "name")
+        cwd = _optional_str_or_none(body, "cwd")
+        layout_type = _optional_str_or_none(body, "layout_type")
+        layout_spec = _optional_str_or_none(body, "layout_spec")
+        pane_commands = _require_str_list(body, "pane_commands") or None
+    except _ValidationError as exc:
+        return web.json_response({"error": str(exc)}, status=exc.status)
 
     result = await mgr.create_session(
         host_id, name, cwd=cwd, layout_type=layout_type,
@@ -355,18 +431,15 @@ async def handle_create_template(request: web.Request) -> web.Response:
     except Exception:
         return web.json_response({"error": "Invalid JSON body"}, status=400)
 
-    template_name = body.get("template_name", "").strip()
-    if not template_name:
-        return web.json_response({"error": "'template_name' is required"}, status=400)
-
-    name = body.get("name", "").strip()
-    directory = body.get("directory", "").strip()
-    layout_type = body.get("layout_type", "none").strip()
-    layout_spec = body.get("layout_spec", "").strip()
-    pane_commands = body.get("pane_commands", [])
-
-    if not isinstance(pane_commands, list):
-        return web.json_response({"error": "'pane_commands' must be an array"}, status=400)
+    try:
+        template_name = _require_str(body, "template_name")
+        name = _optional_str(body, "name")
+        directory = _optional_str(body, "directory")
+        layout_type = _optional_str(body, "layout_type", "none")
+        layout_spec = _optional_str(body, "layout_spec")
+        pane_commands = _require_str_list(body, "pane_commands")
+    except _ValidationError as exc:
+        return web.json_response({"error": str(exc)}, status=exc.status)
 
     # Validate macro placeholders in all template content fields.
     for label, text in [("name", name), ("directory", directory),
@@ -408,14 +481,14 @@ async def handle_update_template(request: web.Request) -> web.Response:
     except Exception:
         return web.json_response({"error": "Invalid JSON body"}, status=400)
 
-    name = body.get("name", "").strip()
-    directory = body.get("directory", "").strip()
-    layout_type = body.get("layout_type", "none").strip()
-    layout_spec = body.get("layout_spec", "").strip()
-    pane_commands = body.get("pane_commands", [])
-
-    if not isinstance(pane_commands, list):
-        return web.json_response({"error": "'pane_commands' must be an array"}, status=400)
+    try:
+        name = _optional_str(body, "name")
+        directory = _optional_str(body, "directory")
+        layout_type = _optional_str(body, "layout_type", "none")
+        layout_spec = _optional_str(body, "layout_spec")
+        pane_commands = _require_str_list(body, "pane_commands")
+    except _ValidationError as exc:
+        return web.json_response({"error": str(exc)}, status=exc.status)
 
     # Validate macro placeholders.
     for label, text in [("name", name), ("directory", directory),
@@ -456,9 +529,10 @@ async def handle_rename_template(request: web.Request) -> web.Response:
     except Exception:
         return web.json_response({"error": "Invalid JSON body"}, status=400)
 
-    new_name = body.get("new_name", "").strip()
-    if not new_name:
-        return web.json_response({"error": "'new_name' is required"}, status=400)
+    try:
+        new_name = _require_str(body, "new_name")
+    except _ValidationError as exc:
+        return web.json_response({"error": str(exc)}, status=exc.status)
 
     try:
         entry = store.rename_template(template_name, new_name)
@@ -495,9 +569,10 @@ async def handle_create_from_template(request: web.Request) -> web.Response:
     except Exception:
         return web.json_response({"error": "Invalid JSON body"}, status=400)
 
-    template_name = body.get("template_name", "").strip()
-    if not template_name:
-        return web.json_response({"error": "'template_name' is required"}, status=400)
+    try:
+        template_name = _require_str(body, "template_name")
+    except _ValidationError as exc:
+        return web.json_response({"error": str(exc)}, status=exc.status)
 
     tpl = store.get_template(template_name)
     if tpl is None:
@@ -505,9 +580,10 @@ async def handle_create_from_template(request: web.Request) -> web.Response:
             {"error": f"Template '{template_name}' not found"}, status=404
         )
 
-    variables: dict[str, str] = body.get("variables", {})
-    if not isinstance(variables, dict):
-        return web.json_response({"error": "'variables' must be an object"}, status=400)
+    try:
+        variables = _require_str_dict(body, "variables")
+    except _ValidationError as exc:
+        return web.json_response({"error": str(exc)}, status=exc.status)
 
     # Collect all template content fields for rendering.
     fields = [tpl["name"], tpl["directory"], tpl["layout_spec"]]
@@ -531,9 +607,13 @@ async def handle_create_from_template(request: web.Request) -> web.Response:
         return web.json_response({"error": f"Render error: {exc}"}, status=400)
 
     # Allow optional overlay pane_commands from the request.
-    overlay_commands = body.get("pane_commands")
-    if overlay_commands is not None and not isinstance(overlay_commands, list):
-        return web.json_response({"error": "'pane_commands' must be an array"}, status=400)
+    if "pane_commands" in body:
+        try:
+            overlay_commands = _require_str_list(body, "pane_commands") or None
+        except _ValidationError as exc:
+            return web.json_response({"error": str(exc)}, status=exc.status)
+    else:
+        overlay_commands = None
 
     # Merge: explicit overlay > rendered template commands.
     effective_commands = overlay_commands if overlay_commands is not None else rendered_cmds

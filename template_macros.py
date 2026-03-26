@@ -22,6 +22,8 @@ def validate_placeholders(text: str) -> None:
 
     Returns None when the text is valid (including texts with no placeholders).
     """
+    if not isinstance(text, str):
+        raise ValueError(f"validate_placeholders() expects a string, got {type(text).__name__}")
     if _UNCLOSED_RE.search(text):
         raise ValueError(f"Unclosed '{{' in: {text!r}")
 
@@ -41,6 +43,8 @@ def extract_variables(texts: list[str]) -> list[str]:
     seen: set[str] = set()
     order: list[str] = []
     for text in texts:
+        if not isinstance(text, str):
+            raise ValueError(f"extract_variables() expects strings, got {type(text).__name__}")
         for m in _PLACEHOLDER_RE.finditer(text):
             name = m.group(1)
             if name and name not in seen:
@@ -56,6 +60,13 @@ def render(text: str, variables: dict[str, str]) -> str:
     - a placeholder's variable is absent from *variables*
     - a variable's value is an empty string (macros must expand to something meaningful)
     """
+    if not isinstance(text, str):
+        raise ValueError(f"render() expects a string, got {type(text).__name__}")
+    for name, value in variables.items():
+        if not isinstance(value, str):
+            raise ValueError(
+                f"Variable {name!r} must be a string, got {type(value).__name__}"
+            )
     def _replace(m: re.Match[str]) -> str:
         name = m.group(1)
         if name not in variables:

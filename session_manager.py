@@ -823,6 +823,16 @@ class SessionManager:
         Returns session info dict on success, or ``{"error": "..."}`` on failure.
         """
         # --- macro guard for direct (non-template) create ---
+        # Validate pane_commands element types first — before any iteration.
+        if pane_commands is not None:
+            if not isinstance(pane_commands, list):
+                return {"error": "'pane_commands' must be a list"}
+            for i, cmd in enumerate(pane_commands):
+                if not isinstance(cmd, str):
+                    return {
+                        "error": f"pane_commands[{i}] must be a string, got {type(cmd).__name__}"
+                    }
+
         if not _from_template:
             for field_name, value in [("name", name), ("cwd", cwd or ""), ("layout_spec", layout_spec or "")]:
                 if contains_placeholders(value):
@@ -970,8 +980,9 @@ class SessionManager:
         except (OSError, ValueError):
             return []
 
-        # Restrict to home directory.
-        if not str(resolved).startswith(str(home)):
+        # Ancestry check: resolved must be home itself or a descendant of home.
+        # String prefix matching is unsafe (e.g. /home/bee vs /home/beekeeper).
+        if resolved != home and home not in resolved.parents:
             return []
 
         if prefix.endswith("/"):
@@ -1103,6 +1114,7 @@ class SessionManager:
         """Return a paginated session list for a specific host."""
         if page_size is None:
             page_size = self._settings.session_page_size
+        page_size = max(1, page_size)  # Defensive: prevent ZeroDivisionError
         host_sessions = self._host_sessions.get(host_id, {})
         all_sessions = sorted(host_sessions.values(), key=lambda s: s.name)
         total = len(all_sessions)

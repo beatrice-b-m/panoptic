@@ -207,6 +207,31 @@ def _validate_serve_args(args: argparse.Namespace) -> None:
         print(f"error: --port must be 1-65535, got {args.port}", file=sys.stderr)
         sys.exit(1)
 
+    if args.poll_interval_active < 1:
+        print(
+            f"error: --poll-interval-active must be >= 1, got {args.poll_interval_active}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if args.poll_interval_idle < 1:
+        print(
+            f"error: --poll-interval-idle must be >= 1, got {args.poll_interval_idle}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if args.session_page_size < 1:
+        print(
+            f"error: --session-page-size must be >= 1, got {args.session_page_size}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if args.ssh_connect_timeout < 1:
+        print(
+            f"error: --ssh-connect-timeout must be >= 1, got {args.ssh_connect_timeout}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
 def _build_settings(args: argparse.Namespace) -> RuntimeSettings:
     """Construct RuntimeSettings from parsed CLI arguments."""
     defaults = RuntimeSettings.from_defaults()
