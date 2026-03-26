@@ -390,8 +390,7 @@ button {
 /* Thumbnail region */
 .session-thumbnail-wrap {
     background: var(--bg-inset);
-    min-height: 100px;
-    max-height: 180px;
+    height: 160px;
     overflow: hidden;
     display: flex;
     align-items: flex-start;

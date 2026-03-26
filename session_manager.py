@@ -1211,9 +1211,10 @@ class SessionManager:
     @staticmethod
     def _render_svg(text: str) -> str:
         """Produce a dark-bg monospace SVG from plain text."""
-        lines = text.splitlines()
-        # Pad to minimum height so empty sessions don't collapse.
-        while len(lines) < 4:
+        lines = text.splitlines()[:SNAPSHOT_MAX_LINES]
+        # Pad to exactly SNAPSHOT_MAX_LINES so every thumbnail has
+        # identical dimensions regardless of pane content length.
+        while len(lines) < SNAPSHOT_MAX_LINES:
             lines.append("")
 
         char_w = 7.2  # approximate width of a monospace char at 12px
@@ -1221,7 +1222,7 @@ class SessionManager:
         pad_x = 10
         pad_y = 10
         width = int(SNAPSHOT_MAX_COLS * char_w + 2 * pad_x)
-        height = len(lines) * char_h + 2 * pad_y
+        height = SNAPSHOT_MAX_LINES * char_h + 2 * pad_y
 
         escaped_lines: list[str] = []
         for i, line in enumerate(lines):
