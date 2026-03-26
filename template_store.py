@@ -12,6 +12,7 @@ Each template entry has:
 """
 
 import json
+import logging
 import re
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from config import TEMPLATES_CONFIG_PATH
 TEMPLATE_NAME_RE = re.compile(r'^[A-Za-z0-9_-]+$')
 
 _VALID_LAYOUT_TYPES = frozenset({"none", "row", "col"})
+log = logging.getLogger(__name__)
 
 
 class TemplateStore:
@@ -124,15 +126,39 @@ class TemplateStore:
                 data = json.loads(self._path.read_text())
                 templates = data.get("templates")
                 if isinstance(templates, list):
-                    self._templates = templates
-            except (json.JSONDecodeError, KeyError, TypeError):
+                    self._templates = [t for t in templates if self._validate_template_entry(t)]
+                else:
+                    self._templates = []
+            except (json.JSONDecodeError, KeyError, TypeError) as exc:
+                log.warning("Failed to parse %s: %s; starting with empty template list", self._path, exc)
                 self._templates = []
 
     def _save(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.write_text(
-            json.dumps({"templates": self._templates}, indent=2) + "\n"
-        )
+        content = json.dumps({"templates": self._templates}, indent=2) + "\n"
+        tmp = self._path.with_suffix(".tmp")
+        tmp.write_text(content)
+        tmp.replace(self._path)
+
+    @staticmethod
+    def _validate_template_entry(entry: object) -> bool:
+        """Return True if *entry* has the minimum required shape for a template."""
+        if not isinstance(entry, dict):
+            log.warning("Skipping non-dict template entry: %r", entry)
+            return False
+        required_str = {"template_name", "name", "layout_type"}
+        for field in required_str:
+            if field not in entry or not isinstance(entry[field], str):
+                log.warning("Skipping template entry missing or invalid '%s': %r", field, entry)
+                return False
+        if entry["layout_type"] not in ("none", "row", "col"):
+            log.warning("Skipping template with invalid layout_type %r: %r", entry["layout_type"], entry)
+            return False
+        cmds = entry.get("pane_commands")
+        if cmds is not None and not isinstance(cmds, list):
+            log.warning("Skipping template with non-list pane_commands: %r", entry)
+            return False
+        return True
 
     # ----------------------------------------------------------- helpers
 

@@ -30,7 +30,7 @@ A lightweight web dashboard that discovers your tmux sessions and exposes each o
 
 | Requirement | Notes |
 |---|---|
-| Python 3.9+ | `python3 --version` to check |
+| Python 3.11+ | `python3 --version` to check |
 | tmux | `brew install tmux` (macOS) or `sudo apt install tmux` (Ubuntu) |
 | [ttyd](https://github.com/tsl0922/ttyd) | see platform-specific instructions below |
 | [Tailscale](https://tailscale.com) | optional -- required only for remote/HTTPS access |
@@ -68,7 +68,7 @@ Verify the install: `ttyd --version`.
 ## Quick Start (macOS)
 
 ```bash
-git clone https://github.com/youruser/tmux-local-dash && cd tmux-local-dash
+git clone <your-repo-url> && cd tmux-local-dash
 ./setup-service.sh
 ```
 
@@ -77,7 +77,7 @@ This installs dependencies (ttyd, aiohttp), registers a launchd plist, and **sta
 ## Quick Start (Ubuntu / Linux)
 
 ```bash
-git clone https://github.com/youruser/tmux-local-dash && cd tmux-local-dash
+git clone <your-repo-url> && cd tmux-local-dash
 pip3 install aiohttp
 
 # Start in foreground
@@ -389,7 +389,7 @@ A systemd user unit is provided in `panoptic.service`. Install it:
 
 ```bash
 # Edit the unit file: replace __INSTALL_DIR__ with the actual project path
-sed "s|__INSTALL_DIR__|$(pwd)|g" panoptic.service > ~/.config/systemd/user/panoptic.service
+sed "s|__INSTALL_DIR__|$(pwd)|g; s|__PYTHON3__|$(python3 -c 'import sys; print(sys.executable)')|g" panoptic.service > ~/.config/systemd/user/panoptic.service
 
 # Reload and start
 systemctl --user daemon-reload

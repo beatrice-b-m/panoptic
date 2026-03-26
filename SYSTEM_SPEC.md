@@ -40,13 +40,15 @@
 
 ```
 Mac Mini
-├── panoptic server (Python, port 7680)
+├── panoptic server (Python, port 7680, optional TLS)
 │   ├── Dashboard HTTP endpoint    GET /
-│   ├── Session API endpoint       GET /api/sessions
-│   ├── WebSocket terminal proxy   WS  /ws/{session_name}/{pane_id}
-│   └── Static assets              GET /static/*
-└── ttyd processes (one per active tmux session, ports 7681–7699)
-    └── spawned/killed dynamically by session watcher
+│   ├── Host API                  GET/POST/DELETE /api/hosts/...
+│   ├── Session API               GET/POST/DELETE /api/hosts/{host_id}/sessions/...
+│   ├── Template API              GET/POST/PUT/PATCH/DELETE /api/templates/...
+│   ├── Terminal reverse proxy     /terminal/{host_id}/{session_name}/...
+│   └── Static assets             GET /static/*
+└── ttyd processes (one per active session, local ports 7681–7699)
+    └── reverse-proxied through the dashboard port
 ```
 
 ### 3.2 Process Roles
@@ -130,9 +132,21 @@ This is called on session selection and refreshed on a 5s interval while the ses
 
 Returns dashboard HTML page (single-page app).
 
-#### `GET /api/sessions`
+#### `GET /api/hosts`
 
-Returns JSON list of active sessions.
+Returns JSON list of configured hosts.
+
+#### `POST /api/hosts`
+
+Add a new host. Body: `{host_id, hostname, ssh_user, ssh_port?}`.
+
+#### `DELETE /api/hosts/{host_id}`
+
+Remove a host and tear down its active sessions.
+
+#### `GET /api/hosts/{host_id}/sessions`
+
+Returns JSON list of active sessions on the specified host.
 
 **Response:**
 
@@ -140,6 +154,7 @@ Returns JSON list of active sessions.
 {
   "sessions": [
     {
+      "host_id": "mac-mini",
       "name": "omp-instance-1",
       "windows": 2,
       "attached": false,
@@ -157,28 +172,14 @@ Returns JSON list of active sessions.
 
 **Query params:** `?page=1&page_size=8`
 
-#### `GET /api/sessions/{session_name}/panes`
+#### `POST /api/hosts/{host_id}/sessions`
 
-Returns pane layout for a session.
+Create a new session on the specified host.
 
-**Response:**
+#### `DELETE /api/hosts/{host_id}/sessions/{session_name}`
 
-```json
-{
-	"session": "omp-instance-1",
-	"panes": [
-		{
-			"id": "%0",
-			"index": 0,
-			"width": 220,
-			"height": 50,
-			"active": true,
-			"title": "bash",
-			"ttyd_url": "http://localhost:7681"
-		}
-	]
-}
-```
+Kill a session on the specified host.
+
 
 #### `GET /api/health`
 
@@ -206,9 +207,16 @@ Delete a template by name.
 Create session by rendering a template. Body: `{template_name, variables: {var: value}, pane_commands?}`.
 All template variables must be provided with non-empty values.
 
-### 5.2 WebSocket (via ttyd)
+### 5.2 Terminal Reverse Proxy
 
-Each `ttyd` process handles its own WebSocket connections at `ws://localhost:{port}/ws`. The dashboard frontend embeds the ttyd web UI via `<iframe>` pointed at `http://{tailscale-ip}:{port}` for full xterm.js terminal functionality.
+All terminal traffic is reverse-proxied through the dashboard server at
+`/terminal/{host_id}/{session_name}/{path}`.  The browser never connects
+to ttyd ports directly.
+
+- HTTP requests are forwarded to the corresponding ttyd process.
+- WebSocket upgrades (used by xterm.js) are bridged between the browser
+  and ttyd.
+- Only the dashboard port (7680) needs to be exposed.
 
 ---
 
@@ -237,34 +245,16 @@ Each `ttyd` process handles its own WebSocket connections at `ws://localhost:{po
 
 ### 6.2 Session View (Terminal)
 
-**URL:** `/{session_name}` or `/?session={session_name}`
+**URL:** `/?host={host_id}&session={session_name}`
 
 **Layout:**
 
 - Back button → returns to session list
-- Session name in header
-- Pane layout rendered as a CSS grid matching the actual tmux pane geometry
-- Each pane rendered as an `<iframe>` embedding the ttyd UI for that session/pane
+- Session name in header with actions menu
+- Single terminal container embedding the ttyd-served xterm.js terminal
+- Terminal connects via reverse proxy at `/terminal/{host_id}/{session_name}/`
 
-**Pane rendering:**
-
-- Pane iframes sized proportionally to actual tmux pane dimensions (width/height from `tmux list-panes`)
-- Active pane highlighted with a visible border
-- Clicking a pane focuses that iframe for keyboard input
-- Pane titles shown in small label above each pane
-
-**Keyboard handling:**
-
-- Default keyboard input goes to whichever pane iframe is focused
-- Tab/click to switch focus between panes
-- No keyboard shortcuts captured at the dashboard level (all input passes through to xterm.js)
-
-**Mouse handling:**
-
-- Mouse events forwarded to xterm.js within each pane iframe natively
-- Scroll in pane scrolls terminal history
-
-**Auto-refresh:** Pane layout refreshes every 5s to detect pane splits/closures while session view is open.
+**Keyboard handling:** All input passes through to xterm.js. No dashboard-level shortcuts.
 
 ### 6.3 Visual Design
 
@@ -290,20 +280,18 @@ Each `ttyd` process handles its own WebSocket connections at `ws://localhost:{po
 ```bash
 ttyd \
   --port {port} \
-  --interface 127.0.0.1 \
-  --once \
+  --interface {bind_host} \
   --writable \
-  --title-format "tmux: {session_name}" \
-  tmux attach-session -t {session_name}
+  --base-path /terminal/{host_id}/{session_name}/ \
+  -t fontFamily={font_family} \
+  tmux -u attach-session -t {session_name}
 ```
 
 **Flags:**
 
-- `--interface 127.0.0.1` — bind only to loopback; dashboard server or direct Tailscale access handles routing
+- `--interface {bind_host}` — bind to loopback (`127.0.0.1`); all access is via the reverse proxy
 - `--writable` — allow keyboard input (not read-only)
-- `--once` — ttyd exits when the terminal session ends (tmux detach or session close)
-
-> **Note:** If direct iframe access over Tailscale is used (recommended, see §8), remove `--interface 127.0.0.1` and bind to `0.0.0.0` instead, so the Tailscale IP can reach each port directly.
+- `--base-path` — path prefix that matches the reverse proxy mount point
 
 ### 7.3 Process Lifecycle
 
@@ -380,37 +368,31 @@ tail -f /path/to/panoptic/logs/stdout.log
 
 ## 8. Network and Access
 
-### 8.1 Tailscale Access Pattern
+### 8.1 Access Pattern
 
-The recommended access pattern uses direct browser access to ttyd ports over Tailscale:
+All browser traffic flows through the dashboard port:
 
 ```
-Your device (Tailscale client)
-    │
-    └─► https://mac-mini.tailnet.ts.net:7680   ← dashboard
-    └─► http://mac-mini.tailnet.ts.net:7681    ← ttyd for session 1
-    └─► http://mac-mini.tailnet.ts.net:7682    ← ttyd for session 2
-    ...
+Browser
+  └─► https://<host>:7680/           ← dashboard
+  └─► https://<host>:7680/terminal/...  ← reverse proxy to ttyd
 ```
 
-The dashboard page references ttyd iframes using the Tailscale hostname/IP directly (served to the browser at page load time). The server API returns the full URL for each session's ttyd endpoint.
+The server reverse-proxies terminal HTTP and WebSocket traffic to per-session
+ttyd processes.  Only port 7680 needs to be reachable.
 
 ### 8.2 Dashboard Server Binding
 
-Bind the dashboard server to `0.0.0.0` (all interfaces) or explicitly to the Tailscale interface IP. Since Tailscale creates a private encrypted tunnel, no additional TLS or authentication is required for personal use.
-
-```python
-# Bind to all interfaces; Tailscale firewall handles access control
-HOST = "0.0.0.0"
-DASHBOARD_PORT = 7680
-```
+The dashboard binds to `127.0.0.1` by default.  Set `DASHBOARD_HOST = "0.0.0.0"`
+(or the Tailscale interface IP) to make it reachable from other machines.
+Since Tailscale creates a private encrypted tunnel, no additional TLS or
+authentication is required for personal use.
 
 ### 8.3 Firewall Considerations
 
-- macOS firewall may prompt on first run for each port — accept or pre-configure
+- Only port 7680 needs to be open (ttyd ports are internal only)
 - No port-forwarding on home router required (Tailscale is peer-to-peer)
 - Optionally restrict to Tailscale interface only using `100.x.x.x` bind address
-
 ---
 
 ## 9. Efficiency When Idle
@@ -433,9 +415,11 @@ The following measures keep resource usage low when the dashboard has no active 
 
 ```
 panoptic/
-├── server.py              # Main aiohttp/FastAPI server
+├── server.py              # Main aiohttp server, route wiring
 ├── session_manager.py     # tmux session discovery + ttyd lifecycle
+├── host_config.py         # Host registry: add/remove/list remote hosts
 ├── config.py              # Configuration constants
+├── panoptic_cli.py        # CLI entry point (serve, add-host, etc.)
 ├── template_store.py      # Template persistence (JSON-backed CRUD)
 ├── template_macros.py     # Macro placeholder validation, extraction, rendering
 ├── static/
@@ -445,7 +429,10 @@ panoptic/
 ├── logs/
 │   ├── stdout.log
 │   └── stderr.log
-├── com.user.panoptic.plist  # launchd plist template
+├── hosts.json             # Persisted host registry
+├── templates.json         # Persisted session templates
+├── panoptic.service       # systemd unit template (Linux)
+├── com.user.panoptic.plist  # launchd plist template (macOS)
 ├── setup-service.sh       # Sets up panoptic as a background launchd service
 └── README.md
 ```
@@ -457,17 +444,23 @@ panoptic/
 All configuration via constants in `config.py` (no external config file needed for a personal tool):
 
 ```python
-DASHBOARD_HOST = "0.0.0.0"
+DASHBOARD_HOST = "127.0.0.1"
 DASHBOARD_PORT = 7680
 TTYD_PORT_RANGE_START = 7681
 TTYD_PORT_RANGE_END = 7699
-TTYD_BIND_HOST = "0.0.0.0"       # Set to "127.0.0.1" to restrict ttyd to loopback
+TTYD_BIND_HOST = "127.0.0.1"       # ttyd binds to loopback; proxied by dashboard
 POLL_INTERVAL_ACTIVE = 5          # seconds, when clients connected
 POLL_INTERVAL_IDLE = 30           # seconds, when no clients
 SESSION_PAGE_SIZE = 8
 TTYD_BINARY = "ttyd"              # or absolute path: /opt/homebrew/bin/ttyd
+TTYD_FONT_FAMILY = "monospace"    # font passed to ttyd -t fontFamily=
 LOG_LEVEL = "INFO"
+HOSTS_CONFIG_PATH = "hosts.json"  # path to host registry
 TEMPLATES_CONFIG_PATH = "templates.json"  # path to template store
+SSH_CONNECT_TIMEOUT = 10          # seconds for SSH connection attempts
+BEAMUX_BINARY = "beamux"          # remote tmux session launcher
+CLIENT_ACTIVE_TIMEOUT = 30        # seconds before client considered inactive
+CLIENT_DEEP_IDLE_TIMEOUT = 300    # seconds before switching to deep-idle polling
 ```
 
 ---
@@ -478,7 +471,7 @@ TEMPLATES_CONFIG_PATH = "templates.json"  # path to template store
 | ------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
 | tmux not running                      | API returns empty session list; UI shows "No sessions found"                                                 |
 | ttyd binary not found                 | Server logs error on startup; dashboard shows warning banner                                                 |
-| Session ends while UI open            | UI detects pane closure (iframe disconnect), shows "Session ended" overlay, returns to session list after 3s |
+| Session ends while UI open            | Terminal proxy detects backend ttyd termination; browser-side reconnection attempts fail gracefully        |
 | Port pool exhausted (>19 sessions)    | Log warning; excess sessions listed in UI as "unavailable" with port count shown                             |
 | Server restart with existing sessions | Re-enumerates tmux; re-spawns ttyd for all active sessions                                                   |
 | ttyd process dies unexpectedly        | Session watcher detects missing PID on next tick; attempts respawn                                           |

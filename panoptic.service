@@ -5,7 +5,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=__INSTALL_DIR__
-ExecStart=/usr/bin/python3 panoptic_cli.py serve
+ExecStart=__PYTHON3__ panoptic_cli.py serve
 Restart=on-failure
 RestartSec=5
 

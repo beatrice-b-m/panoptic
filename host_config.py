@@ -13,6 +13,7 @@ localhost always exists and cannot be removed.
 """
 
 import json
+import logging
 import re
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from config import HOSTS_CONFIG_PATH
 
 
 HOST_ID_RE = re.compile(r"^[a-z0-9_-]+$")
+log = logging.getLogger(__name__)
 _SAFE_SSH_ALIAS_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._@:/-]*$')
 
 _LOCALHOST_ENTRY: dict = {
@@ -96,16 +98,39 @@ class HostConfig:
                 data = json.loads(self._path.read_text())
                 hosts = data.get("hosts")
                 if isinstance(hosts, list):
-                    self._hosts = hosts
-            except (json.JSONDecodeError, KeyError, TypeError):
+                    self._hosts = [h for h in hosts if self._validate_host_entry(h)]
+                else:
+                    self._hosts = []
+            except (json.JSONDecodeError, KeyError, TypeError) as exc:
+                log.warning("Failed to parse %s: %s; starting with empty host list", self._path, exc)
                 self._hosts = []
         self._ensure_localhost()
 
     def _save(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.write_text(
-            json.dumps({"hosts": self._hosts}, indent=2) + "\n"
-        )
+        content = json.dumps({"hosts": self._hosts}, indent=2) + "\n"
+        tmp = self._path.with_suffix(".tmp")
+        tmp.write_text(content)
+        tmp.replace(self._path)
+
+    @staticmethod
+    def _validate_host_entry(entry: object) -> bool:
+        """Return True if *entry* has the minimum required shape for a host."""
+        if not isinstance(entry, dict):
+            log.warning("Skipping non-dict host entry: %r", entry)
+            return False
+        required = {"id", "type"}
+        for field in required:
+            if field not in entry or not isinstance(entry[field], str):
+                log.warning("Skipping host entry missing or invalid '%s': %r", field, entry)
+                return False
+        if entry["type"] not in ("local", "ssh"):
+            log.warning("Skipping host entry with invalid type %r: %r", entry["type"], entry)
+            return False
+        if entry["type"] == "ssh" and not entry.get("ssh_alias"):
+            log.warning("Skipping SSH host entry without ssh_alias: %r", entry)
+            return False
+        return True
 
     def _ensure_localhost(self) -> None:
         for h in self._hosts:

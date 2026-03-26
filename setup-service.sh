@@ -59,6 +59,11 @@ else
     info "Python $PY_VERSION — OK"
 fi
 
+# Resolve the absolute path to the python3 executable for the plist.
+# This ensures the service uses the same interpreter that pip3 installed into.
+PYTHON3_PATH="$(python3 -c 'import sys; print(sys.executable)')"
+info "Using Python: $PYTHON3_PATH"
+
 # ── system dependencies ───────────────────────────────────────────────────────
 
 if brew list ttyd &>/dev/null 2>&1; then
@@ -93,6 +98,7 @@ mkdir -p "$HOME/Library/LaunchAgents"
 sed \
     -e "s|__INSTALL_DIR__|$SCRIPT_DIR|g" \
     -e "s|__HOME_DIR__|$HOME|g" \
+    -e "s|__PYTHON3__|$PYTHON3_PATH|g" \
     "$PLIST_SRC" > "$PLIST_DEST"
 
 info "Plist installed to $PLIST_DEST"
