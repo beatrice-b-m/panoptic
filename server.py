@@ -3,14 +3,16 @@ from __future__ import annotations
 """panoptic server: HTTP API + static file serving + session lifecycle.
 
 When TLS_CERT and TLS_KEY point to valid files (e.g. from ``tailscale cert``),
-the server terminates TLS directly.  All ttyd terminal traffic is reverse-
-proxied through the dashboard port so only one port needs to be exposed.
+the server terminates TLS directly. Terminal sessions use a WebSocket bridge
+to tmux control mode through the dashboard port so only one port needs to be
+exposed.
 
 Session routes are scoped under ``/api/hosts/{host_id}/sessions/...`` and
-the terminal proxy lives at ``/terminal/{host_id}/{session_name}/...``.
+terminal WebSocket bridge lives at ``/ws/hosts/{host_id}/sessions/{session_name}``.
 """
 
 import os
+import json
 import asyncio
 import logging
 import ssl
@@ -23,6 +25,7 @@ import aiohttp
 from aiohttp import web
 
 from config import RuntimeSettings
+from control_bridge import ControlBridge
 from host_config import HostConfig
 from session_manager import SessionManager
 from template_macros import validate_placeholders, extract_variables, render, contains_placeholders
@@ -65,7 +68,7 @@ async def security_headers_middleware(request: web.Request, handler):
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
     response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
-    # CSP: allow self + inline styles (for ttyd) + ws/wss for terminal connections
+    # CSP: allow self + inline styles + ws/wss for terminal connections
     response.headers.setdefault(
         "Content-Security-Policy",
         "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
@@ -308,7 +311,7 @@ async def handle_remove_host(request: web.Request) -> web.Response:
             {"error": f"Host '{host_id}' not found"}, status=404
         )
 
-    # Clean up sessions and ttyd processes for the removed host.
+    # Clean up sessions for the removed host.
     await mgr.remove_host_sessions(host_id)
 
     mgr.reload_hosts()
@@ -346,17 +349,11 @@ async def handle_panes(request: web.Request) -> web.Response:
 
     panes = await mgr.get_panes(host_id, session_name)
 
-    safe_host = urlquote(host_id, safe="")
-    safe_name = urlquote(session_name, safe="")
-    for pane in panes:
-        port = pane.pop("port", None)
-        pane["ttyd_url"] = f"/terminal/{safe_host}/{safe_name}/" if port else None
-
     return web.json_response({"session": session_name, "panes": panes})
 
 
 async def handle_session_detail(request: web.Request) -> web.Response:
-    """Return metadata and ttyd_url for a single session."""
+    """Return metadata and ws_url for a single session."""
     mgr: SessionManager = request.app["session_manager"]
     host_id = request.match_info["host_id"]
     session_name = request.match_info["session_name"]
@@ -371,7 +368,7 @@ async def handle_session_detail(request: web.Request) -> web.Response:
 
     safe_host = urlquote(host_id, safe="")
     safe_name = urlquote(session_name, safe="")
-    ttyd_url = f"/terminal/{safe_host}/{safe_name}/" if sess.port else None
+    ws_url = f"/ws/hosts/{safe_host}/sessions/{safe_name}"
 
     return web.json_response({
         "name": sess.name,
@@ -379,7 +376,7 @@ async def handle_session_detail(request: web.Request) -> web.Response:
         "windows": sess.windows,
         "attached": sess.attached,
         "created_epoch": sess.created_epoch,
-        "ttyd_url": ttyd_url,
+        "ws_url": ws_url,
     })
 
 
@@ -717,158 +714,116 @@ async def handle_create_from_template(request: web.Request) -> web.Response:
 
 
 # ---------------------------------------------------------------------------
-# ttyd reverse proxy — forwards HTTP and WebSocket to the per-session ttyd
+# Terminal WebSocket bridge — connects browser to tmux control mode
 # ---------------------------------------------------------------------------
 
-# Headers that must not be forwarded between proxy hops.
-_HOP_HEADERS = frozenset({
-    "host", "connection", "upgrade", "keep-alive",
-    "transfer-encoding", "te", "trailer",
-    "sec-websocket-key", "sec-websocket-version",
-    "sec-websocket-extensions", "sec-websocket-accept",
-})
 
-
-def _proxy_request_headers(request: web.Request) -> dict[str, str]:
-    """Filter inbound request headers for proxying."""
-    return {
-        k: v for k, v in request.headers.items()
-        if k.lower() not in _HOP_HEADERS
-    }
-
-
-def _ttyd_target(request: web.Request) -> tuple[str | None, str | None, int | None]:
-    """Resolve (host_id, session_name, port) from the route.
-
-    Returns (None, None, None) when the session doesn't exist or has no port.
-    """
+async def handle_terminal_ws(request: web.Request) -> web.WebSocketResponse:
+    """WebSocket endpoint bridging the browser to a tmux control mode client."""
     host_id = request.match_info["host_id"]
     session_name = request.match_info["session_name"]
     mgr: SessionManager = request.app["session_manager"]
+    settings: RuntimeSettings = request.app["settings"]
+
+    # Verify session exists
     host_sessions = mgr.sessions_for_host(host_id)
-    sess = host_sessions.get(session_name)
-    if sess is None or sess.port is None:
-        return None, None, None
-    return host_id, session_name, sess.port
+    if session_name not in host_sessions:
+        return web.Response(status=404, text="Session not found")
 
+    ws = web.WebSocketResponse()
+    await ws.prepare(request)
 
-async def handle_terminal(request: web.Request) -> web.Response | web.WebSocketResponse:
-    """Reverse-proxy HTTP and WebSocket requests to the session's ttyd."""
-    host_id, session_name, port = _ttyd_target(request)
-    if port is None:
-        return web.Response(status=502, text="Terminal not available")
-
-    # Reconstruct the full path ttyd expects (started with --base-path).
-    safe_host = urlquote(host_id, safe="")
-    safe_name = urlquote(session_name, safe="")
-    suffix = request.match_info.get("path", "")
-    target = f"http://127.0.0.1:{port}/terminal/{safe_host}/{safe_name}/{suffix}"
-    if request.query_string:
-        target += f"?{request.query_string}"
-
-    if request.headers.get("Upgrade", "").lower() == "websocket":
-        return await _proxy_ws(request, target)
-
-    return await _proxy_http(request, target)
-
-
-async def _proxy_http(request: web.Request, target: str) -> web.Response:
-    """Forward a plain HTTP request to ttyd and relay the response."""
-    cs: aiohttp.ClientSession = request.app["client_session"]
+    # Determine cols/rows from query params or config defaults
     try:
-        async with cs.request(
-            request.method,
-            target,
-            headers=_proxy_request_headers(request),
-            data=await request.read() if request.can_read_body else None,
-            allow_redirects=False,
-        ) as resp:
-            body = await resp.read()
-            headers: dict[str, str] = {}
-            for h in (
-                "Content-Type", "Content-Encoding", "Cache-Control",
-                "ETag", "Last-Modified",
-            ):
-                if h in resp.headers:
-                    headers[h] = resp.headers[h]
-            return web.Response(status=resp.status, body=body, headers=headers)
-    except Exception as exc:
-        log.warning("Terminal HTTP proxy error → %s: %s", target, exc)
-        return web.Response(status=502, text="Terminal proxy error")
+        cols = int(request.query.get("cols", settings.control_bridge_cols))
+        rows = int(request.query.get("rows", settings.control_bridge_rows))
+    except ValueError:
+        cols, rows = settings.control_bridge_cols, settings.control_bridge_rows
 
+    host = request.app["host_config"].get_host(host_id)
+    ssh_alias = host.get("ssh_alias") if host and host["type"] == "ssh" else None
 
-async def _proxy_ws(request: web.Request, target: str) -> web.WebSocketResponse:
-    """Bridge a WebSocket between the browser and ttyd."""
-    # Negotiate subprotocol with the browser (ttyd uses 'tty').
-    protocols: tuple[str, ...] = ()
-    proto_header = request.headers.get("Sec-WebSocket-Protocol", "")
-    if proto_header:
-        protocols = tuple(
-            p.strip() for p in proto_header.split(",") if p.strip()
-        )
+    bridge = ControlBridge(
+        session_name=session_name,
+        cols=cols,
+        rows=rows,
+        tmux_path=mgr._tmux_path,
+        ssh_alias=ssh_alias,
+        ssh_connect_timeout=settings.ssh_connect_timeout,
+    )
 
-    ws_server = web.WebSocketResponse(protocols=protocols)
-    await ws_server.prepare(request)
+    bridges: dict = request.app["active_bridges"]
+    bridge_key = id(ws)  # unique per connection
+    bridges[bridge_key] = bridge
 
-    ws_url = target.replace("http://", "ws://", 1)
-    cs: aiohttp.ClientSession = request.app["client_session"]
-
+    relay_task: asyncio.Task | None = None
     try:
-        async with cs.ws_connect(ws_url, protocols=protocols) as ws_client:
+        await bridge.start()
 
-            async def _fwd_client_to_server():
-                """ttyd → browser."""
-                async for msg in ws_client:
-                    if ws_server.closed:
-                        break
-                    if msg.type == aiohttp.WSMsgType.TEXT:
-                        await ws_server.send_str(msg.data)
-                    elif msg.type == aiohttp.WSMsgType.BINARY:
-                        await ws_server.send_bytes(msg.data)
-                    elif msg.type in (
-                        aiohttp.WSMsgType.CLOSE,
-                        aiohttp.WSMsgType.CLOSING,
-                        aiohttp.WSMsgType.CLOSED,
-                        aiohttp.WSMsgType.ERROR,
-                    ):
-                        break
+        async def relay_events():
+            """Push bridge events to the browser."""
+            async for event in bridge.events():
+                if ws.closed:
+                    break
+                if event["type"] == "output":
+                    pane_id_bytes = event["pane_id"].encode()
+                    frame = (
+                        b"\x01"
+                        + len(pane_id_bytes).to_bytes(2, "big")
+                        + pane_id_bytes
+                        + event["data"]
+                    )
+                    await ws.send_bytes(frame)
+                elif event["type"] == "exit":
+                    if not ws.closed:
+                        await ws.send_str(json.dumps({"type": "exit"}))
+                    break
+                else:
+                    # layout, window_add, window_close, etc. — JSON text frame
+                    await ws.send_str(json.dumps(event))
 
-            async def _fwd_server_to_client():
-                """browser → ttyd."""
-                async for msg in ws_server:
-                    if msg.type == aiohttp.WSMsgType.TEXT:
-                        await ws_client.send_str(msg.data)
-                    elif msg.type == aiohttp.WSMsgType.BINARY:
-                        await ws_client.send_bytes(msg.data)
-                    elif msg.type in (
-                        aiohttp.WSMsgType.CLOSE,
-                        aiohttp.WSMsgType.CLOSING,
-                        aiohttp.WSMsgType.CLOSED,
-                        aiohttp.WSMsgType.ERROR,
-                    ):
-                        break
+        relay_task = asyncio.create_task(relay_events())
 
-            done, pending = await asyncio.wait(
-                [
-                    asyncio.ensure_future(_fwd_client_to_server()),
-                    asyncio.ensure_future(_fwd_server_to_client()),
-                ],
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            for task in pending:
-                task.cancel()
+        async for msg in ws:
+            if msg.type == aiohttp.WSMsgType.TEXT:
                 try:
-                    await task
-                except (asyncio.CancelledError, Exception):
-                    pass
+                    data = json.loads(msg.data)
+                except Exception:
+                    continue
+                msg_type = data.get("type")
+                if msg_type == "input":
+                    pane_id = data.get("pane_id", "")
+                    try:
+                        raw = bytes.fromhex(data.get("data", ""))
+                    except ValueError:
+                        continue
+                    await bridge.send_keys(pane_id, raw)
+                elif msg_type == "select_pane":
+                    await bridge.select_pane(data.get("pane_id", ""))
+                elif msg_type == "resize":
+                    try:
+                        next_cols = int(data.get("cols", cols))
+                        next_rows = int(data.get("rows", rows))
+                    except (TypeError, ValueError):
+                        continue
+                    cols, rows = next_cols, next_rows
+                    await bridge.resize(next_cols, next_rows)
+            elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSE):
+                break
 
-    except Exception as exc:
-        log.warning("WebSocket proxy error: %s", exc)
+    except Exception:
+        log.exception("WebSocket bridge error for %s/%s", host_id, session_name)
+    finally:
+        if relay_task is not None:
+            relay_task.cancel()
+            try:
+                await relay_task
+            except asyncio.CancelledError:
+                pass
+        await bridge.stop()
+        bridges.pop(bridge_key, None)
 
-    if not ws_server.closed:
-        await ws_server.close()
-    return ws_server
-
+    return ws
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -929,11 +884,7 @@ async def on_startup(app: web.Application) -> None:
     app["session_manager"] = mgr
     app["start_time"] = time.monotonic()
 
-    # Shared HTTP client for the reverse proxy.
-    app["client_session"] = aiohttp.ClientSession(auto_decompress=False)
-
-    # Kill orphaned ttyd processes from a previous server run.
-    await mgr.kill_stale_ttyd()
+    app["active_bridges"] = {}
 
     # Run an initial poll so the API has data before the first client connects.
     await mgr.poll_sessions()
@@ -960,10 +911,10 @@ async def on_startup(app: web.Application) -> None:
 
 
 async def on_cleanup(app: web.Application) -> None:
-    cs: aiohttp.ClientSession | None = app.get("client_session")
-    if cs:
-        await cs.close()
-
+    bridges = app.get("active_bridges", {})
+    for bridge in list(bridges.values()):
+        await bridge.stop()
+    bridges.clear()
     mgr: SessionManager = app.get("session_manager")
     if mgr:
         await mgr.cleanup()
@@ -1035,11 +986,9 @@ def build_app(settings: RuntimeSettings) -> web.Application:
         "/api/hosts/{host_id}/sessions/from-template", handle_create_from_template
     )
 
-    # ttyd reverse proxy — host-scoped catch-all
-    app.router.add_route(
-        "*",
-        "/terminal/{host_id}/{session_name}/{path:.*}",
-        handle_terminal,
+    app.router.add_get(
+        "/ws/hosts/{host_id}/sessions/{session_name}",
+        handle_terminal_ws,
     )
 
     # Static files
@@ -1070,16 +1019,16 @@ def run_server(settings: RuntimeSettings) -> None:
     app["_tls_enabled"] = ssl_ctx is not None
 
 
-    # Fail fast if the HTTP port is already in use — avoid destroying
-    # ttyd processes that belong to another running instance.
+    # Fail fast if the HTTP port is already in use — avoid conflicts with
+    # a running instance.
     _sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     _sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         _sock.bind((settings.host, settings.port))
     except OSError:
         log.error(
-            "Port %d already in use; aborting startup to avoid killing "
-            "ttyd processes from the running instance",
+            "Port %d already in use; aborting startup to avoid conflicts "
+            "with the running instance",
             settings.port,
         )
         raise SystemExit(1)

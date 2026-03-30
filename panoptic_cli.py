@@ -61,33 +61,23 @@ def _build_serve_parser(subparsers: argparse._SubParsersAction) -> None:
         help="Force loopback binding and print SSH tunnel instructions",
     )
 
-    # -- ttyd
+    # -- terminal bridge
     p.add_argument(
-        "--ttyd-bind-host",
-        default=None,
-        help=f"Interface each ttyd process binds on (default: {defaults.ttyd_bind_host})",
+        "--font-family",
+        default=defaults.terminal_font_family,
+        help=f"Font family for dashboard terminals (default: {defaults.terminal_font_family!r})",
     )
     p.add_argument(
-        "--ttyd-port-start",
+        "--bridge-cols",
         type=int,
-        default=defaults.ttyd_port_start,
-        help=f"First port in the ttyd pool (default: {defaults.ttyd_port_start})",
+        default=defaults.control_bridge_cols,
+        help=f"Initial control bridge cols (default: {defaults.control_bridge_cols})",
     )
     p.add_argument(
-        "--ttyd-port-end",
+        "--bridge-rows",
         type=int,
-        default=defaults.ttyd_port_end,
-        help=f"Last port in the ttyd pool (default: {defaults.ttyd_port_end})",
-    )
-    p.add_argument(
-        "--ttyd-binary",
-        default=defaults.ttyd_binary,
-        help=f"Path to ttyd executable (default: {defaults.ttyd_binary})",
-    )
-    p.add_argument(
-        "--ttyd-font-family",
-        default=defaults.ttyd_font_family,
-        help=f"Font family for ttyd terminals (default: {defaults.ttyd_font_family!r})",
+        default=defaults.control_bridge_rows,
+        help=f"Initial control bridge rows (default: {defaults.control_bridge_rows})",
     )
 
     # -- tmux / beamux
@@ -173,38 +163,22 @@ def _validate_serve_args(args: argparse.Namespace) -> None:
             )
             sys.exit(1)
 
-        if args.ttyd_bind_host is not None and args.ttyd_bind_host != "127.0.0.1":
-            print(
-                f"error: --headless requires ttyd to bind on 127.0.0.1, "
-                f"but --ttyd-bind-host {args.ttyd_bind_host!r} was specified.\n"
-                f"Either drop --ttyd-bind-host or use --ttyd-bind-host 127.0.0.1.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-
-    if args.ttyd_port_start < 1 or args.ttyd_port_start > 65535:
-        print(
-            f"error: --ttyd-port-start must be 1-65535, got {args.ttyd_port_start}",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-    if args.ttyd_port_end < 1 or args.ttyd_port_end > 65535:
-        print(
-            f"error: --ttyd-port-end must be 1-65535, got {args.ttyd_port_end}",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    if args.ttyd_port_start > args.ttyd_port_end:
-        print(
-            f"error: --ttyd-port-start ({args.ttyd_port_start}) must be <= "
-            f"--ttyd-port-end ({args.ttyd_port_end})",
-            file=sys.stderr,
-        )
-        sys.exit(1)
 
     if args.port < 1 or args.port > 65535:
         print(f"error: --port must be 1-65535, got {args.port}", file=sys.stderr)
+        sys.exit(1)
+
+    if args.bridge_cols < 1:
+        print(
+            f"error: --bridge-cols must be >= 1, got {args.bridge_cols}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if args.bridge_rows < 1:
+        print(
+            f"error: --bridge-rows must be >= 1, got {args.bridge_rows}",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     if args.poll_interval_active < 1:
@@ -238,25 +212,17 @@ def _build_settings(args: argparse.Namespace) -> RuntimeSettings:
 
     if args.headless:
         host = "127.0.0.1"
-        ttyd_bind_host = "127.0.0.1"
     else:
         host = args.host if args.host is not None else defaults.host
-        ttyd_bind_host = (
-            args.ttyd_bind_host
-            if args.ttyd_bind_host is not None
-            else defaults.ttyd_bind_host
-        )
 
     return RuntimeSettings(
         host=host,
         port=args.port,
-        ttyd_port_start=args.ttyd_port_start,
-        ttyd_port_end=args.ttyd_port_end,
-        ttyd_bind_host=ttyd_bind_host,
-        ttyd_binary=args.ttyd_binary,
+        control_bridge_cols=args.bridge_cols,
+        control_bridge_rows=args.bridge_rows,
         tmux_binary=args.tmux_binary,
         beamux_binary=args.beamux_binary,
-        ttyd_font_family=args.ttyd_font_family,
+        terminal_font_family=args.font_family,
         poll_interval_active=args.poll_interval_active,
         poll_interval_idle=args.poll_interval_idle,
         session_page_size=args.session_page_size,
@@ -281,7 +247,6 @@ def _print_headless_instructions(settings: RuntimeSettings) -> None:
     print("=" * 60)
     print()
     print(f"  Dashboard bound to 127.0.0.1:{settings.port} (loopback only)")
-    print(f"  ttyd processes bound to 127.0.0.1 (loopback only)")
     print()
     print("  To access the dashboard from your local machine,")
     print("  open an SSH tunnel:")
@@ -290,7 +255,7 @@ def _print_headless_instructions(settings: RuntimeSettings) -> None:
     print()
     print(f"  Then browse: {scheme}://127.0.0.1:{settings.port}")
     print()
-    print("  (All terminal traffic is reverse-proxied through the")
+    print("  (All terminal traffic uses WebSocket through the")
     print("  dashboard port — no additional port forwards needed.)")
     print("=" * 60)
     print()

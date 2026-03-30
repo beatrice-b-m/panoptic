@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-"""Session manager: tracks tmux sessions across multiple hosts and owns ttyd lifecycle.
+"""Session manager: tracks tmux sessions across multiple hosts.
 
 Hosts are either local (direct tmux subprocess) or remote (tmux over SSH).
-The port pool and ttyd processes always run locally — for remote hosts, ttyd
-execs ``ssh <alias> tmux -u attach-session -t <name>`` instead of a direct
-tmux attach.
 """
 
 import asyncio
@@ -15,11 +12,8 @@ from pathlib import Path
 import logging
 import math
 import re
-import shutil
-import signal
 import time
-from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable
 from urllib.parse import quote as urlquote
 
@@ -63,12 +57,6 @@ class SessionInfo:
     windows: int
     attached: bool
     created_epoch: int
-    port: int | None = None
-    ttyd_pid: int | None = None
-    # The live asyncio Process handle — not part of the serialisable API surface.
-    _process: asyncio.subprocess.Process | None = field(
-        default=None, repr=False, compare=False
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -81,11 +69,6 @@ class SessionManager:
         self._host_config = host_config
         self._settings = settings
 
-        # Port pool: deque gives O(1) allocate/release. Shared across all hosts.
-        self._port_pool: deque[int] = deque(
-            range(settings.ttyd_port_start, settings.ttyd_port_end + 1)
-        )
-        self._allocated_ports: set[int] = set()
 
         # Per-host session registries: host_id -> {session_name -> SessionInfo}
         self._host_sessions: dict[str, dict[str, SessionInfo]] = {}
@@ -98,24 +81,23 @@ class SessionManager:
 
         self._poll_task: asyncio.Task | None = None
 
-        # Resolve local binaries to absolute paths once so ttyd's child process
-        # does not depend on PATH propagation (which fails under launchd).
-        self._ttyd_path = shutil.which(settings.ttyd_binary) or settings.ttyd_binary
-        self._tmux_path = shutil.which(settings.tmux_binary) or settings.tmux_binary
-        self._ssh_path = shutil.which("ssh") or "ssh"
-        if self._ttyd_path == settings.ttyd_binary:
-            log.warning(
-                "Could not resolve ttyd to absolute path; using %r", settings.ttyd_binary
-            )
+        # Resolve local binaries to absolute paths once so child processes do not
+        # depend on PATH propagation (which can fail under launchd).
+        def _resolve_binary(binary: str) -> str:
+            if os.path.sep in binary:
+                return binary
+            for path_entry in os.get_exec_path():
+                candidate = os.path.join(path_entry, binary)
+                if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                    return candidate
+            return binary
+
+        self._tmux_path = _resolve_binary(settings.tmux_binary)
+        self._ssh_path = _resolve_binary("ssh")
         if self._tmux_path == settings.tmux_binary:
             log.warning(
                 "Could not resolve tmux to absolute path; using %r", settings.tmux_binary
             )
-
-        # PID file tracking ttyd processes spawned by this instance.
-        # Lives next to the source files so it persists across restarts.
-        _project_dir = os.path.dirname(os.path.abspath(__file__))
-        self._ttyd_pid_file: str = os.path.join(_project_dir, '.ttyd.pids')
 
         # Initialise per-host structures for all configured hosts.
         self._sync_host_structures()
@@ -154,31 +136,8 @@ class SessionManager:
         return sum(len(sessions) for sessions in self._host_sessions.values())
 
     async def remove_host_sessions(self, host_id: str) -> None:
-        """Kill all ttyd processes for a host and clear its session registry."""
-        for name in list(self.sessions_for_host(host_id)):
-            await self._kill_ttyd(host_id, name)
-
-    async def kill_stale_ttyd(self) -> None:
-        """Kill orphaned ttyd processes left over from a previous server run.
-
-        Public entry point for server startup.  Delegates to the private
-        implementation.
-        """
-        await self._kill_stale_ttyd()
-
-    # ------------------------------------------------------------------ ports
-
-    def allocate_port(self) -> int | None:
-        if not self._port_pool:
-            return None
-        port = self._port_pool.popleft()
-        self._allocated_ports.add(port)
-        return port
-
-    def release_port(self, port: int) -> None:
-        if port in self._allocated_ports:
-            self._allocated_ports.discard(port)
-            self._port_pool.append(port)
+        self._host_sessions.pop(host_id, None)
+        self._snapshot_cache.pop(host_id, None)
 
     # ---------------------------------------------------------- tmux commands
 
@@ -317,8 +276,10 @@ class SessionManager:
                     "tmux unavailable on host %s (rc=%d); clearing sessions",
                     host_id, returncode,
                 )
-                for name in list(host_sessions):
-                    await self._kill_ttyd(host_id, name)
+                host_sessions.clear()
+                host_cache = self._snapshot_cache.get(host_id)
+                if host_cache:
+                    host_cache.clear()
             return
 
         # Success — host is reachable and tmux returned sessions.
@@ -353,7 +314,10 @@ class SessionManager:
 
         # Sessions that disappeared.
         for gone in current - incoming:
-            await self._kill_ttyd(host_id, gone)
+            host_sessions.pop(gone, None)
+            host_cache = self._snapshot_cache.get(host_id)
+            if host_cache:
+                host_cache.pop(gone, None)
 
         # Sessions that are new.
         for new in incoming - current:
@@ -365,36 +329,19 @@ class SessionManager:
                 attached=info["attached"],
                 created_epoch=info["created_epoch"],
             )
-            await self._spawn_ttyd(host_id, new)
 
-        # Existing sessions: update mutable fields and detect dead ttyd.
+        # Existing sessions: update mutable fields.
         for name in current & incoming:
             info = live[name]
             sess = host_sessions[name]
             sess.windows = info["windows"]
             sess.attached = info["attached"]
             sess.created_epoch = info["created_epoch"]
-            # Respawn ttyd if it died between polls.
-            if sess._process is not None and sess._process.returncode is not None:
-                log.info(
-                    "ttyd for %s/%s exited (rc=%d); respawning",
-                    host_id, name, sess._process.returncode,
-                )
-                if sess.port is not None:
-                    self.release_port(sess.port)
-                    sess.port = None
-                sess.ttyd_pid = None
-                sess._process = None
-                await self._spawn_ttyd(host_id, name)
 
     # ------------------------------------------------------- pane discovery
 
     async def get_panes(self, host_id: str, session_name: str) -> list[dict]:
-        """Return pane metadata for a session on a host.
-
-        The caller (server endpoint) is responsible for constructing ttyd_url
-        using the returned port and the inbound request host.
-        """
+        """Return pane metadata for a session on a host."""
         rc, stdout, _ = await self._run_tmux(host_id,
         "list-panes", "-t", session_name,
         "-F",
@@ -405,10 +352,6 @@ class SessionManager:
                 "tmux list-panes failed for %s/%s", host_id, session_name
             )
             return []
-
-        host_sessions = self._host_sessions.get(host_id, {})
-        sess = host_sessions.get(session_name)
-        port = sess.port if sess else None
 
         panes: list[dict] = []
         for line in stdout.splitlines():
@@ -431,7 +374,6 @@ class SessionManager:
                     "height": int(height_s),
                     "active": active_s != "0",
                     "title": title,
-                    "port": port,
                 })
             except ValueError:
                 log.warning(
@@ -440,224 +382,6 @@ class SessionManager:
                 )
 
         return panes
-
-    # ------------------------------------------------------- ttyd lifecycle
-
-    async def _wait_for_port_ready(self, port: int, timeout: float = 3.0) -> bool:
-        """Block until *port* accepts a TCP connection, or *timeout* expires."""
-        deadline = asyncio.get_event_loop().time() + timeout
-        while asyncio.get_event_loop().time() < deadline:
-            try:
-                _, writer = await asyncio.wait_for(
-                    asyncio.open_connection("127.0.0.1", port),
-                    timeout=0.5,
-                )
-                writer.close()
-                await writer.wait_closed()
-                return True
-            except (ConnectionRefusedError, asyncio.TimeoutError, OSError):
-                await asyncio.sleep(0.1)
-        return False
-
-    async def _spawn_ttyd(self, host_id: str, session_name: str) -> None:
-        """Allocate a port and start a ttyd process for the given session."""
-        port = self.allocate_port()
-        if port is None:
-            log.warning(
-                "Port pool exhausted; %s/%s will not have a ttyd instance",
-                host_id, session_name,
-            )
-            return
-
-        safe_host = urlquote(host_id, safe="")
-        safe_name = urlquote(session_name, safe="")
-        base_path = f"/terminal/{safe_host}/{safe_name}/"
-
-        host = self._host_config.get_host(host_id)
-        if host is None:
-            self.release_port(port)
-            return
-
-        # Build the attach command that ttyd will exec.
-        # Local:  <tmux_path> -u attach-session -t <name>
-        # SSH:    <ssh_path> <alias> tmux -u attach-session -t <name>
-        if host["type"] == "local":
-            attach_cmd = [
-                self._tmux_path, "-u", "attach-session", "-t", session_name,
-            ]
-        else:
-            attach_cmd = [
-                self._ssh_path, host["ssh_alias"],
-                "tmux", "-u", "attach-session", "-t", session_name,
-            ]
-
-        cmd = [
-            self._ttyd_path,
-            "--port", str(port),
-            "--interface", self._settings.ttyd_bind_host,
-            "--writable",
-            "--base-path", base_path,
-            "-t", f"fontFamily={self._settings.ttyd_font_family}",
-            *attach_cmd,
-        ]
-
-        # Ensure the child process sees a UTF-8 locale.
-        env = os.environ.copy()
-        env.setdefault("LANG", "en_US.UTF-8")
-        env.setdefault("LC_ALL", "en_US.UTF-8")
-
-        try:
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                env=env,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-        except FileNotFoundError:
-            log.error(
-                "ttyd binary not found (%r); %s/%s will have no terminal",
-                self._ttyd_path, host_id, session_name,
-            )
-            self.release_port(port)
-            return
-        except Exception:
-            log.exception(
-                "Failed to spawn ttyd for %s/%s on port %d",
-                host_id, session_name, port,
-            )
-            self.release_port(port)
-            return
-
-        host_sessions = self._host_sessions.get(host_id, {})
-        sess = host_sessions.get(session_name)
-        if sess is None:
-            # Session removed between port allocation and spawn — clean up.
-            process.kill()
-            self.release_port(port)
-            return
-
-        sess.port = port
-        sess.ttyd_pid = process.pid
-        sess._process = process
-        self._record_ttyd_pid(process.pid)
-        log.info(
-            "Spawned ttyd for %s/%s on port %d (pid=%d)",
-            host_id, session_name, port, process.pid,
-        )
-
-    async def _kill_ttyd(self, host_id: str, session_name: str) -> None:
-        """Terminate the ttyd process for a session and reclaim its port.
-
-        Removes the session from the host registry unconditionally.
-        """
-        host_sessions = self._host_sessions.get(host_id)
-        if host_sessions is None:
-            return
-
-        sess = host_sessions.pop(session_name, None)
-
-        # Clean snapshot cache for this session.
-        host_cache = self._snapshot_cache.get(host_id)
-        if host_cache:
-            host_cache.pop(session_name, None)
-
-        if sess is None:
-            return
-
-        if sess.port is not None:
-            self.release_port(sess.port)
-
-        proc = sess._process
-        if proc is None or proc.returncode is not None:
-            # Already dead — still clean up PID tracking.
-            if sess.ttyd_pid is not None:
-                self._remove_ttyd_pid(sess.ttyd_pid)
-            return
-
-        try:
-            proc.send_signal(signal.SIGTERM)
-        except ProcessLookupError:
-            return
-
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=5.0)
-        except asyncio.TimeoutError:
-            log.warning(
-                "ttyd for %s/%s did not exit after SIGTERM; sending SIGKILL",
-                host_id, session_name,
-            )
-            try:
-                proc.kill()
-            except ProcessLookupError:
-                pass
-            await proc.wait()
-
-        log.info(
-            "Killed ttyd for %s/%s (pid=%s)", host_id, session_name, sess.ttyd_pid
-        )
-        if sess.ttyd_pid is not None:
-            self._remove_ttyd_pid(sess.ttyd_pid)
-
-    def _read_pid_file(self) -> set[int]:
-        """Read recorded ttyd PIDs from the PID file."""
-        try:
-            with open(self._ttyd_pid_file) as f:
-                return {int(line.strip()) for line in f if line.strip().isdigit()}
-        except FileNotFoundError:
-            return set()
-
-    def _write_pid_file(self, pids: set[int]) -> None:
-        """Write the current set of ttyd PIDs to the PID file."""
-        os.makedirs(os.path.dirname(self._ttyd_pid_file), exist_ok=True)
-        with open(self._ttyd_pid_file, 'w') as f:
-            for pid in sorted(pids):
-                f.write(f'{pid}\n')
-
-    def _record_ttyd_pid(self, pid: int) -> None:
-        """Add a PID to the PID file."""
-        pids = self._read_pid_file()
-        pids.add(pid)
-        self._write_pid_file(pids)
-
-    def _remove_ttyd_pid(self, pid: int) -> None:
-        """Remove a PID from the PID file."""
-        pids = self._read_pid_file()
-        pids.discard(pid)
-        self._write_pid_file(pids)
-
-    async def _kill_stale_ttyd(self) -> None:
-        """Kill ttyd processes recorded by a previous server run."""
-        stale_pids = self._read_pid_file()
-        if not stale_pids:
-            return
-
-        killed = False
-        for pid in stale_pids:
-            # Verify the PID is still a ttyd process (protects against PID recycling).
-            try:
-                proc = await asyncio.create_subprocess_exec(
-                    'ps', '-p', str(pid), '-o', 'comm=',
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.DEVNULL,
-                )
-                stdout, _ = await proc.communicate()
-                if 'ttyd' not in stdout.decode().strip():
-                    continue
-            except Exception:
-                continue
-
-            try:
-                os.kill(pid, signal.SIGTERM)
-                killed = True
-            except ProcessLookupError:
-                pass
-
-        # Clear the file regardless — stale PIDs are either killed or gone.
-        self._write_pid_file(set())
-
-        if killed:
-            log.info('Killed stale ttyd processes from a previous run')
-            await asyncio.sleep(0.5)
 
     # ------------------------------------------------------- layout helpers
 
@@ -949,12 +673,6 @@ class SessionManager:
                 "error": f"Session {name!r} was created but not found after polling"
             }
 
-        # Block until ttyd is actually accepting connections.
-        if sess.port is not None:
-            ready = await self._wait_for_port_ready(sess.port)
-            if not ready:
-                log.warning("ttyd for %s/%s not ready within timeout", host_id, name)
-
         safe_host = urlquote(host_id, safe="")
         safe_name = urlquote(name, safe="")
         return {
@@ -963,11 +681,11 @@ class SessionManager:
             "windows": sess.windows,
             "attached": sess.attached,
             "created_epoch": sess.created_epoch,
-            "ttyd_url": f"/terminal/{safe_host}/{safe_name}/",
+            "ws_url": f"/ws/hosts/{safe_host}/sessions/{safe_name}",
         }
 
     async def delete_session(self, host_id: str, name: str) -> dict:
-        """Kill a tmux session on a host and release its ttyd process/port."""
+        """Kill a tmux session on a host."""
         host_sessions = self._host_sessions.get(host_id, {})
         if name not in host_sessions:
             return {"error": f"Session '{name}' not found"}
@@ -978,7 +696,10 @@ class SessionManager:
         if rc != 0:
             return {"error": f"tmux kill-session failed: {output}"}
 
-        await self._kill_ttyd(host_id, name)
+        host_sessions.pop(name, None)
+        host_cache = self._snapshot_cache.get(host_id)
+        if host_cache:
+            host_cache.pop(name, None)
 
         return {
             "name": name,
@@ -1040,12 +761,8 @@ class SessionManager:
     # --------------------------------------------------------- cleanup hook
 
     async def cleanup(self) -> None:
-        """Kill all managed ttyd processes.  Call on server shutdown."""
+        """Stop background polling.  Call on server shutdown."""
         await self.stop_polling()
-        for host_id in list(self._host_sessions):
-            for name in list(self._host_sessions[host_id]):
-                await self._kill_ttyd(host_id, name)
-        self._write_pid_file(set())
 
     # --------------------------------------------------------- polling loop
 
@@ -1156,7 +873,6 @@ class SessionManager:
                     "windows": s.windows,
                     "attached": s.attached,
                     "created_epoch": s.created_epoch,
-                    "port": s.port,
                 }
                 for s in slice_
             ],

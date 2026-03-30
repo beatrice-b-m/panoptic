@@ -7,19 +7,17 @@ from dataclasses import dataclass
 DASHBOARD_HOST = "127.0.0.1"
 DASHBOARD_PORT = 7680
 
-# ttyd port pool (supports up to 19 concurrent sessions)
-TTYD_PORT_RANGE_START = 7681
-TTYD_PORT_RANGE_END = 7699
-TTYD_BIND_HOST = "127.0.0.1"
-TTYD_BINARY = "ttyd"
+# Control bridge defaults
+CONTROL_BRIDGE_COLS = 220
+CONTROL_BRIDGE_ROWS = 50
 TMUX_BINARY = "tmux"
 
 # beamux — used for pane-layout creation when shelling out.
 # Install from https://github.com/beatrice-b-m/beamux or override via env var.
 BEAMUX_BINARY = os.getenv("BEAMUX_BINARY", "beamux")
 
-# Terminal font (passed to ttyd via -t fontFamily=...)
-TTYD_FONT_FAMILY = os.getenv("TTYD_FONT_FAMILY", "'Hack Nerd Font', 'Hack Nerd Font Mono', Menlo, Consolas, monospace")
+# Terminal font for dashboard terminals
+TERMINAL_FONT_FAMILY = os.getenv("TERMINAL_FONT_FAMILY", "'Hack Nerd Font', 'Hack Nerd Font Mono', Menlo, Consolas, monospace")
 
 # Polling intervals (seconds)
 POLL_INTERVAL_ACTIVE = 5
@@ -71,13 +69,11 @@ class RuntimeSettings:
 
     host: str = DASHBOARD_HOST
     port: int = DASHBOARD_PORT
-    ttyd_port_start: int = TTYD_PORT_RANGE_START
-    ttyd_port_end: int = TTYD_PORT_RANGE_END
-    ttyd_bind_host: str = TTYD_BIND_HOST
-    ttyd_binary: str = TTYD_BINARY
+    control_bridge_cols: int = CONTROL_BRIDGE_COLS
+    control_bridge_rows: int = CONTROL_BRIDGE_ROWS
     tmux_binary: str = TMUX_BINARY
     beamux_binary: str = BEAMUX_BINARY
-    ttyd_font_family: str = TTYD_FONT_FAMILY
+    terminal_font_family: str = TERMINAL_FONT_FAMILY
     poll_interval_active: int = POLL_INTERVAL_ACTIVE
     poll_interval_idle: int = POLL_INTERVAL_IDLE
     client_active_timeout: int = CLIENT_ACTIVE_TIMEOUT
