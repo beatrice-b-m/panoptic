@@ -45,10 +45,10 @@ Mac Mini
 │   ├── Host API                  GET/POST/DELETE /api/hosts/...
 │   ├── Session API               GET/POST/DELETE /api/hosts/{host_id}/sessions/...
 │   ├── Template API              GET/POST/PUT/PATCH/DELETE /api/templates/...
-│   ├── Terminal reverse proxy     /terminal/{host_id}/{session_name}/...
+│   ├── Session WS endpoint       /ws/hosts/{host_id}/sessions/{session_name}
 │   └── Static assets             GET /static/*
-└── ttyd processes (one per active session, local ports 7681–7699)
-    └── reverse-proxied through the dashboard port
+└── tmux control-mode bridges (one bridge per active host/session view)
+    └── connects to tmux via `tmux -CC` and streams pane updates over WebSocket
 ```
 
 ### 3.2 Process Roles
@@ -57,15 +57,17 @@ Mac Mini
 
 - Serves the dashboard HTML/JS frontend
 - Maintains a session registry by polling `tmux ls` on a configurable interval
-- Spawns and tracks one `ttyd` process per discovered session
-- Tears down `ttyd` processes when sessions disappear
+- Manages tmux control-mode bridges for active terminal views
+- Routes browser WebSocket clients to the corresponding control-mode bridge
 - Idles gracefully: polling slows to a long interval (~30s) when no WebSocket clients are connected
 
-**ttyd processes** (one per session, managed by panoptic):
+**tmux control-mode bridge** (host/session scoped, managed by panoptic):
 
-- Each instance attaches to a specific tmux session: `ttyd tmux attach -t {session_name}`
-- Bound to `127.0.0.1` only (not exposed directly; proxied by the dashboard server or accessed via port)
-- Killed and cleaned up when the tmux session ends
+- Starts `tmux -CC attach-session -t {session_name}` (directly or via SSH for remote hosts)
+- Parses control-mode output and tracks pane metadata/state
+- Emits pane-specific terminal frames to browser clients over WebSocket
+- Applies browser input (keys, resize, mouse) back to tmux control mode
+- Stops when the session view closes or the tmux session ends
 
 ### 3.3 Technology Stack
 
@@ -73,15 +75,14 @@ Mac Mini
 | ------------------ | ----------------------------------- | ------------------------------------- |
 | Server language    | Python 3.11+                        | Available on macOS, minimal deps      |
 | HTTP/WS framework  | `aiohttp` or `FastAPI` + `uvicorn`  | Async, low idle overhead              |
-| Terminal server    | `ttyd` (Homebrew)                   | Production-quality, xterm.js built-in |
+| Terminal transport | tmux control mode (`tmux -CC`)      | Native pane events + bidirectional control |
 | Frontend           | Vanilla HTML/CSS/JS (no build step) | Simple, maintainable, no npm required |
-| Terminal renderer  | xterm.js (bundled with ttyd)        | Full VT emulation, mouse support      |
+| Terminal renderer  | xterm.js (per-pane instances)       | Full VT emulation, mouse support      |
 | Process management | `launchd` plist                     | macOS-native, survives login/reboot   |
 
 **Install dependencies:**
 
 ```bash
-brew install ttyd
 pip3 install aiohttp   # or: pip3 install fastapi uvicorn
 ```
 
@@ -117,11 +118,10 @@ This is called on session selection and refreshed on a 5s interval while the ses
 
 ### 4.3 Session Registry Lifecycle
 
-- **New session detected:** spawn `ttyd` process for it, assign port from pool
-- **Session disappears:** send close signal to connected WebSocket clients, kill `ttyd` process, release port
-- **Server startup:** enumerate existing sessions, spawn `ttyd` for each
-- **Server shutdown:** kill all child `ttyd` processes cleanly
-
+- **New session detected:** add to registry; bridge starts only when a client opens that session
+- **Session disappears:** send close signal to connected WebSocket clients and tear down any active bridge
+- **Server startup:** enumerate existing sessions and populate registry
+- **Server shutdown:** close active control-mode bridges cleanly
 ---
 
 ## 5. API Specification
@@ -158,10 +158,8 @@ Returns JSON list of active sessions on the specified host.
       "name": "omp-instance-1",
       "windows": 2,
       "attached": false,
-      "created_epoch": 1700000000,
-      "port": 7681
-    },
-    ...
+      "created_epoch": 1700000000
+    }
   ],
   "total": 5,
   "page": 1,
@@ -207,17 +205,16 @@ Delete a template by name.
 Create session by rendering a template. Body: `{template_name, variables: {var: value}, pane_commands?}`.
 All template variables must be provided with non-empty values.
 
-### 5.2 Terminal Reverse Proxy
+### 5.2 Terminal WebSocket Bridge
 
-All terminal traffic is reverse-proxied through the dashboard server at
-`/terminal/{host_id}/{session_name}/{path}`.  The browser never connects
-to ttyd ports directly.
+Terminal traffic uses a dedicated WebSocket endpoint:
+`/ws/hosts/{host_id}/sessions/{session_name}`.
 
-- HTTP requests are forwarded to the corresponding ttyd process.
-- WebSocket upgrades (used by xterm.js) are bridged between the browser
-  and ttyd.
+- Browser clients connect directly to this endpoint (no reverse proxy subroute).
+- The server binds the socket to the corresponding host/session control-mode bridge.
+- Outbound frames carry pane-targeted terminal output for per-pane xterm instances.
+- Inbound frames carry user input, resize events, and pane focus/mouse actions.
 - Only the dashboard port (7680) needs to be exposed.
-
 ---
 
 ## 6. Frontend Specification
@@ -251,9 +248,8 @@ to ttyd ports directly.
 
 - Back button → returns to session list
 - Session name in header with actions menu
-- Single terminal container embedding the ttyd-served xterm.js terminal
-- Terminal connects via reverse proxy at `/terminal/{host_id}/{session_name}/`
-
+- Pane grid with one xterm.js instance per tmux pane
+- Terminal data connects via WebSocket at `/ws/hosts/{host_id}/sessions/{session_name}`
 **Keyboard handling:** All input passes through to xterm.js. No dashboard-level shortcuts.
 
 ### 6.3 Visual Design
@@ -268,30 +264,25 @@ to ttyd ports directly.
 
 ## 7. Process Management
 
-### 7.1 ttyd Port Allocation
+### 7.1 Control-Mode Bridge Allocation
 
-- Port pool: `7681` to `7699` (supports up to 19 concurrent sessions)
-- Ports assigned sequentially from pool on session discovery
-- Released back to pool when session ends
-- Port assignments stored in memory (not persisted; re-assigned on server restart)
+- No per-session port pool is used.
+- Bridge instances are keyed by `{host_id, session_name}` and multiplex over dashboard port `7680`.
+- Bridge lifecycle is demand-driven: start on first viewer, stop when no viewers remain or session ends.
+- Runtime bridge state is kept in memory (not persisted across server restarts).
 
-### 7.2 ttyd Launch Command
+### 7.2 Bridge Launch Command
 
 ```bash
-ttyd \
-  --port {port} \
-  --interface {bind_host} \
-  --writable \
-  --base-path /terminal/{host_id}/{session_name}/ \
-  -t fontFamily={font_family} \
-  tmux -u attach-session -t {session_name}
+tmux -CC -u attach-session -t {session_name}
 ```
 
 **Flags:**
 
-- `--interface {bind_host}` — bind to loopback (`127.0.0.1`); all access is via the reverse proxy
-- `--writable` — allow keyboard input (not read-only)
-- `--base-path` — path prefix that matches the reverse proxy mount point
+- `-CC` — enables control mode for structured pane/event stream
+- `-u` — forces UTF-8 mode for full terminal fidelity
+
+For remote hosts, the server runs the equivalent command over SSH.
 
 ### 7.3 Process Lifecycle
 
@@ -299,16 +290,19 @@ ttyd \
 Server starts
     │
     ├─► enumerate tmux sessions
-    ├─► for each session: spawn ttyd, record PID + port
     └─► start polling loop
+
+User opens session view
+    ├─► start (or reuse) control-mode bridge for {host_id, session_name}
+    └─► attach WebSocket clients to pane streams
 
 Polling tick
     ├─► tmux ls → compare to registry
-    ├─► new sessions: spawn ttyd
-    └─► gone sessions: kill ttyd, emit close event to UI
+    ├─► new sessions: add to registry
+    └─► gone sessions: close bridge + emit close event to UI
 
 Server stops (SIGTERM/SIGINT)
-    └─► kill all child ttyd PIDs
+    └─► close all active control-mode bridges
 ```
 
 ### 7.4 launchd Configuration
@@ -374,13 +368,12 @@ All browser traffic flows through the dashboard port:
 
 ```
 Browser
-  └─► https://<host>:7680/           ← dashboard
-  └─► https://<host>:7680/terminal/...  ← reverse proxy to ttyd
+  └─► https://<host>:7680/                                        ← dashboard + APIs + static assets
+  └─► wss://<host>:7680/ws/hosts/{host_id}/sessions/{session_name} ← terminal stream
 ```
 
-The server reverse-proxies terminal HTTP and WebSocket traffic to per-session
-ttyd processes.  Only port 7680 needs to be reachable.
-
+Terminal rendering uses WebSocket frames from tmux control-mode bridges.
+Only port 7680 needs to be reachable.
 ### 8.2 Dashboard Server Binding
 
 The dashboard binds to `127.0.0.1` by default.  Set `DASHBOARD_HOST = "0.0.0.0"`
@@ -390,7 +383,7 @@ authentication is required for personal use.
 
 ### 8.3 Firewall Considerations
 
-- Only port 7680 needs to be open (ttyd ports are internal only)
+- Only port 7680 needs to be open (terminal WebSocket uses same port)
 - No port-forwarding on home router required (Tailscale is peer-to-peer)
 - Optionally restrict to Tailscale interface only using `100.x.x.x` bind address
 ---
@@ -403,11 +396,11 @@ The following measures keep resource usage low when the dashboard has no active 
 | ------------------------ | ---------------------------------------------- | ---------------------------------------- |
 | Session polling interval | 30s                                            | 5s                                       |
 | Client tracking          | Server counts active WebSocket/SSE connections | Switches to active mode on first connect |
-| ttyd processes           | Persistent (low idle CPU) per session          | Full terminal I/O on demand              |
+| Bridge instances         | None when no session view is open               | Active only for viewed sessions           |
 | Log rotation             | Handled by launchd/logrotate                   | —                                        |
 | Python event loop        | `asyncio` sleep between polls                  | Immediate response to requests           |
 
-`ttyd` itself is very lightweight at idle (it is essentially a sleeping process waiting for a WebSocket connection). With 10 sessions, expect ~10 idle `ttyd` processes consuming negligible CPU and a few MB each.
+Control-mode bridges are spawned on demand and shut down when unused, so idle overhead remains low even with many discovered sessions.
 
 ---
 
@@ -416,7 +409,7 @@ The following measures keep resource usage low when the dashboard has no active 
 ```
 panoptic/
 ├── server.py              # Main aiohttp server, route wiring
-├── session_manager.py     # tmux session discovery + ttyd lifecycle
+├── session_manager.py     # tmux session discovery + control-bridge lifecycle
 ├── host_config.py         # Host registry: add/remove/list remote hosts
 ├── config.py              # Configuration constants
 ├── panoptic_cli.py        # CLI entry point (serve, add-host, etc.)
@@ -446,21 +439,19 @@ All configuration via constants in `config.py` (no external config file needed f
 ```python
 DASHBOARD_HOST = "127.0.0.1"
 DASHBOARD_PORT = 7680
-TTYD_PORT_RANGE_START = 7681
-TTYD_PORT_RANGE_END = 7699
-TTYD_BIND_HOST = "127.0.0.1"       # ttyd binds to loopback; proxied by dashboard
-POLL_INTERVAL_ACTIVE = 5          # seconds, when clients connected
-POLL_INTERVAL_IDLE = 30           # seconds, when no clients
+CONTROL_BRIDGE_COLS = 220          # default width for new pane streams
+CONTROL_BRIDGE_ROWS = 60           # default height for new pane streams
+POLL_INTERVAL_ACTIVE = 5           # seconds, when clients connected
+POLL_INTERVAL_IDLE = 30            # seconds, when no clients
 SESSION_PAGE_SIZE = 8
-TTYD_BINARY = "ttyd"              # or absolute path: /opt/homebrew/bin/ttyd
-TTYD_FONT_FAMILY = "monospace"    # font passed to ttyd -t fontFamily=
+TERMINAL_FONT_FAMILY = "monospace"  # xterm.js font family
 LOG_LEVEL = "INFO"
 HOSTS_CONFIG_PATH = "hosts.json"  # path to host registry
 TEMPLATES_CONFIG_PATH = "templates.json"  # path to template store
-SSH_CONNECT_TIMEOUT = 10          # seconds for SSH connection attempts
-BEAMUX_BINARY = "beamux"          # remote tmux session launcher
-CLIENT_ACTIVE_TIMEOUT = 30        # seconds before client considered inactive
-CLIENT_DEEP_IDLE_TIMEOUT = 300    # seconds before switching to deep-idle polling
+SSH_CONNECT_TIMEOUT = 10           # seconds for SSH connection attempts
+BEAMUX_BINARY = "beamux"           # remote tmux session launcher
+CLIENT_ACTIVE_TIMEOUT = 30         # seconds before client considered inactive
+CLIENT_DEEP_IDLE_TIMEOUT = 300     # seconds before switching to deep-idle polling
 ```
 
 ---
@@ -470,25 +461,25 @@ CLIENT_DEEP_IDLE_TIMEOUT = 300    # seconds before switching to deep-idle pollin
 | Scenario                              | Expected behaviour                                                                                           |
 | ------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
 | tmux not running                      | API returns empty session list; UI shows "No sessions found"                                                 |
-| ttyd binary not found                 | Server logs error on startup; dashboard shows warning banner                                                 |
-| Session ends while UI open            | Terminal proxy detects backend ttyd termination; browser-side reconnection attempts fail gracefully        |
-| Port pool exhausted (>19 sessions)    | Log warning; excess sessions listed in UI as "unavailable" with port count shown                             |
-| Server restart with existing sessions | Re-enumerates tmux; re-spawns ttyd for all active sessions                                                   |
-| ttyd process dies unexpectedly        | Session watcher detects missing PID on next tick; attempts respawn                                           |
-| Browser iframe CORS                   | All resources served from same origin or known Tailscale hostname; no cross-origin issues expected           |
+| control bridge launch fails            | Server logs error and returns terminal connection failure for the requested session                      |
+| Session ends while UI open             | Bridge emits close event; browser disconnects session cleanly                                            |
+| Bridge unavailable or disconnected      | WebSocket closes with explicit error payload; UI can retry connection                                    |
+| Server restart with existing sessions   | Re-enumerates tmux; bridges are recreated on demand when clients reconnect                                |
+| Browser WebSocket reconnect             | Client reconnects to `/ws/...`; server reattaches to active bridge or starts a new one as needed         |
+| Pane renderer initialization mismatch   | UI falls back to configured `CONTROL_BRIDGE_COLS/ROWS`; resize event corrects dimensions after connect   |
 
 ---
 
 ## 13. Implementation Sequence (Suggested for OMP)
 
 1. **`config.py`** — configuration constants
-2. **`session_manager.py`** — tmux polling, ttyd spawn/kill, port pool
-3. **`server.py`** — aiohttp server wiring up REST API endpoints, static file serving, client tracking for idle mode
+2. **`session_manager.py`** — tmux polling, control-bridge start/stop, bridge client fan-out
+3. **`server.py`** — aiohttp server wiring up REST API endpoints, WebSocket terminal endpoint, static file serving, client tracking for idle mode
 4. **`static/style.css`** — dark terminal theme
 5. **`static/index.html`** — dashboard shell, session card template
-6. **`static/app.js`** — fetch-based session list, polling, pane layout renderer, iframe management
+6. **`static/app.js`** — fetch-based session list, polling, pane layout renderer, per-pane xterm management
 7. **`com.user.panoptic.plist`** — launchd plist with correct paths
-8. **`setup-service.sh`** — brew install ttyd, pip install deps, register and start launchd service
+8. **`setup-service.sh`** — install Python deps, register and start launchd service
 9. **`README.md`** — setup instructions, tailscale access guide
 
 ---

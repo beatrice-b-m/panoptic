@@ -66,12 +66,6 @@ info "Using Python: $PYTHON3_PATH"
 
 # ── system dependencies ───────────────────────────────────────────────────────
 
-if brew list ttyd &>/dev/null 2>&1; then
-    info "ttyd already installed — skipping."
-else
-    info "Installing ttyd via Homebrew..."
-    brew install ttyd
-fi
 
 # ── Python dependencies ───────────────────────────────────────────────────────
 

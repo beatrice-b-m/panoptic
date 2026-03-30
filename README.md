@@ -1,6 +1,6 @@
 # panoptic
 
-A lightweight web dashboard that discovers your tmux sessions and exposes each one as a live terminal in the browser via [ttyd](https://github.com/tsl0922/ttyd). Supports multiple hosts — monitor local and remote machines from a single dashboard.
+A lightweight web dashboard that discovers your tmux sessions and exposes each pane as an independent live terminal in the browser via tmux control mode. Supports multiple hosts — monitor local and remote machines from a single dashboard.
 
 <!-- screenshot: dashboard view -->
 
@@ -9,11 +9,11 @@ A lightweight web dashboard that discovers your tmux sessions and exposes each o
 - **Multi-host support** -- monitor tmux sessions on localhost and remote SSH hosts from one dashboard; host tabs switch context instantly
 - **SSH alias-first model** -- remote hosts use your `~/.ssh/config` aliases; panoptic never stores passwords or private keys
 - **Automatic session discovery** -- polls tmux every 5 s (active) / 30 s (idle), no manual registration
-- **Single terminal view** -- clicking a session opens one full ttyd terminal showing the real tmux layout (panes, splits, status bar); up to 19 concurrent sessions across all hosts
+- **Per-pane terminal view** -- clicking a session opens a split-pane terminal grid matching the tmux layout; each pane is an independent xterm.js instance with native text selection
 - **Session thumbnails** -- each gallery card shows a live text snapshot (SVG) of the session, refreshed approximately every 30 seconds
 - **Auto-refresh** -- dashboard reflects session create/destroy in real time without a page reload
 - **Light/dark theme** -- toggle in the header; persists to localStorage; follows `prefers-color-scheme` when no explicit choice is stored
-- **HTTPS via Tailscale** -- optional TLS termination using Tailscale-provisioned certificates; all ttyd traffic is reverse-proxied through a single port
+- **HTTPS via Tailscale** -- optional TLS termination using Tailscale-provisioned certificates; all terminal traffic flows through a single WebSocket port
 - **Configurable terminal font** -- terminal font family defaults to Hack Nerd Font and is overridable via environment variable or CLI flag
 - **Always-on via launchd** -- survives reboots; crashes restart automatically
 - **Remote access** -- use `--host 0.0.0.0` for network access; reach from any device on your Tailscale network
@@ -32,38 +32,9 @@ A lightweight web dashboard that discovers your tmux sessions and exposes each o
 |---|---|
 | Python 3.11+ | `python3 --version` to check |
 | tmux | `brew install tmux` (macOS) or `sudo apt install tmux` (Ubuntu) |
-| [ttyd](https://github.com/tsl0922/ttyd) | see platform-specific instructions below |
 | [Tailscale](https://tailscale.com) | optional -- required only for remote/HTTPS access |
 
 For remote hosts: SSH access with key-based authentication (or ssh-agent / ControlMaster).
-
-### Installing ttyd
-
-**macOS (Homebrew):**
-
-```bash
-brew install ttyd
-```
-
-**Ubuntu / Debian:**
-
-```bash
-sudo apt install build-essential cmake git libjson-c-dev libwebsockets-dev
-git clone https://github.com/tsl0922/ttyd.git
-cd ttyd && mkdir build && cd build
-cmake ..
-make && sudo make install
-```
-
-Or grab a static binary from the [ttyd releases page](https://github.com/tsl0922/ttyd/releases):
-
-```bash
-curl -fsSL https://github.com/tsl0922/ttyd/releases/latest/download/ttyd.x86_64 -o ttyd
-chmod +x ttyd
-sudo mv ttyd /usr/local/bin/
-```
-
-Verify the install: `ttyd --version`.
 
 ## Quick Start (macOS)
 
@@ -72,7 +43,7 @@ git clone <your-repo-url> && cd tmux-local-dash
 ./setup-service.sh
 ```
 
-This installs dependencies (ttyd, aiohttp), registers a launchd plist, and **starts panoptic as a persistent background service**. The server launches on boot and restarts automatically if it crashes. Open `http://localhost:7680` once the script finishes.
+This installs dependencies (aiohttp), registers a launchd plist, and **starts panoptic as a persistent background service**. The server launches on boot and restarts automatically if it crashes. Open `http://localhost:7680` once the script finishes.
 
 ## Quick Start (Ubuntu / Linux)
 
@@ -91,12 +62,10 @@ To run as a persistent service, see [systemd Setup](#systemd-setup-linux) below.
 If you prefer not to use `setup-service.sh` (macOS) or want a minimal install on any platform:
 
 ```bash
-# 1. Install ttyd (see platform instructions above)
-
-# 2. Install Python dependency
+# 1. Install Python dependency
 pip3 install aiohttp
 
-# 3. Start the server (foreground)
+# 2. Start the server (foreground)
 python3 panoptic_cli.py serve
 ```
 
@@ -123,7 +92,7 @@ All flags have sensible defaults from `config.py`. Passing no flags is equivalen
 
 ## Headless / Remote Server
 
-Use `--headless` on a remote server where no browser is available. This forces all listeners (dashboard + ttyd) to `127.0.0.1`, preventing external access, and prints SSH port-forwarding instructions:
+Use `--headless` on a remote server where no browser is available. This forces the dashboard to bind on `127.0.0.1`, preventing external access, and prints SSH port-forwarding instructions:
 
 ```bash
 # On the remote server
@@ -137,7 +106,7 @@ Then from your local machine:
 ssh -N -L 7680:127.0.0.1:7680 user@remote-host
 ```
 
-Browse `http://127.0.0.1:7680` locally. All terminal traffic is reverse-proxied through the dashboard port — no additional port forwards are needed.
+Browse `http://127.0.0.1:7680` locally. All terminal traffic flows through the dashboard WebSocket port — no additional port forwards are needed.
 
 `--headless` rejects conflicting flags:
 
@@ -153,7 +122,7 @@ python3 panoptic_cli.py serve --headless --host 0.0.0.0
 panoptic can monitor tmux sessions on remote machines over SSH. The architecture is simple:
 
 1. **Polling:** The server runs `ssh <alias> tmux list-sessions` periodically to discover remote sessions.
-2. **Terminal access:** Each remote session gets a local ttyd process that runs `ssh <alias> tmux -u attach-session -t <name>`.
+2. **Terminal access:** Each remote session is accessed via tmux control mode over SSH.
 3. **No remote installation needed** -- only SSH access and tmux on the remote machine.
 
 ### Adding a remote host
@@ -215,11 +184,9 @@ All tuneable constants live in `config.py`. Most can also be set via environment
 |---|---|---|---|
 | `DASHBOARD_HOST` | `127.0.0.1` | -- | Interface the dashboard binds on (use `--host 0.0.0.0` for network access) |
 | `DASHBOARD_PORT` | `7680` | -- | Dashboard HTTP port |
-| `TTYD_PORT_RANGE_START` | `7681` | -- | First port in the ttyd pool |
-| `TTYD_PORT_RANGE_END` | `7699` | -- | Last port in the ttyd pool (19 slots) |
-| `TTYD_BIND_HOST` | `127.0.0.1` | -- | Interface each ttyd process binds on |
-| `TTYD_BINARY` | `ttyd` | -- | Path or name of the ttyd executable |
-| `TTYD_FONT_FAMILY` | `Hack Nerd Font, ...` | `TTYD_FONT_FAMILY` | Font family passed to ttyd terminals |
+| `CONTROL_BRIDGE_COLS` | `220` | -- | Default terminal width (columns) for the control bridge |
+| `CONTROL_BRIDGE_ROWS` | `50` | -- | Default terminal height (rows) for the control bridge |
+| `TERMINAL_FONT_FAMILY` | `Hack Nerd Font, ...` | `TERMINAL_FONT_FAMILY` | Font family for browser-side terminal rendering |
 | `POLL_INTERVAL_ACTIVE` | `5` | -- | Seconds between polls when clients are connected |
 | `POLL_INTERVAL_IDLE` | `30` | -- | Seconds between polls when no clients are connected |
 | `SESSION_PAGE_SIZE` | `8` | -- | Sessions shown per page on the dashboard |
@@ -235,14 +202,14 @@ Edit `config.py` or set environment variables and restart the service for change
 
 ### Terminal Font
 
-The terminal font defaults to **Hack Nerd Font** with a fallback chain of Hack Nerd Font Mono, Menlo, Consolas, and generic monospace. Override it via the `TTYD_FONT_FAMILY` environment variable or the `--ttyd-font-family` CLI flag:
+The terminal font defaults to **Hack Nerd Font** with a fallback chain of Hack Nerd Font Mono, Menlo, Consolas, and generic monospace. Override it via the `TERMINAL_FONT_FAMILY` environment variable or the `--font-family` CLI flag:
 
 ```bash
-export TTYD_FONT_FAMILY="JetBrains Mono, Fira Code, monospace"
+export TERMINAL_FONT_FAMILY="JetBrains Mono, Fira Code, monospace"
 python3 panoptic_cli.py serve
 ```
 
-The font must be installed on the **client device** (the browser). The setting is passed to each ttyd instance at spawn time via `-t fontFamily=...`.
+The font must be installed on the **client device** (the browser). The font is applied to each xterm.js instance in the browser.
 
 ### Session Thumbnails
 
@@ -271,7 +238,7 @@ All session endpoints are scoped under `/api/hosts/{host_id}/`.
 |---|---|---|
 | `GET` | `/api/hosts/{host_id}/sessions` | Paginated session list |
 | `POST` | `/api/hosts/{host_id}/sessions` | Create new session |
-| `GET` | `/api/hosts/{host_id}/sessions/{name}` | Session metadata + ttyd_url |
+| `GET` | `/api/hosts/{host_id}/sessions/{name}` | Session metadata + ws_url |
 | `DELETE` | `/api/hosts/{host_id}/sessions/{name}` | Kill session |
 | `GET` | `/api/hosts/{host_id}/sessions/{name}/panes` | Pane layout |
 | `GET` | `/api/hosts/{host_id}/sessions/{name}/thumbnail.svg` | SVG snapshot |
@@ -294,9 +261,9 @@ All session endpoints are scoped under `/api/hosts/{host_id}/`.
 |---|---|---|
 | `GET` | `/api/health` | Liveness check |
 
-### Terminal proxy
+### Terminal WebSocket
 
-All terminal traffic is proxied through `GET /terminal/{host_id}/{session_name}/{path}`.
+Terminal sessions connect via WebSocket at `GET /ws/hosts/{host_id}/sessions/{session_name}`.
 
 ## HTTPS (Tailscale)
 
@@ -327,7 +294,7 @@ Or pass them as CLI flags: `python3 panoptic_cli.py serve --tls-cert /path/to/ce
 https://<tailscale-dns-name>.ts.net:7680
 ```
 
-All terminal traffic is reverse-proxied through the dashboard port, so **only port 7680** needs to be reachable.
+All terminal traffic flows through the dashboard WebSocket port, so **only port 7680** needs to be reachable.
 
 ### Certificate renewal
 
@@ -345,22 +312,25 @@ Browser
   |  HTTP(S) GET /api/hosts/{host_id}/sessions/{name}          -> session detail
   |  HTTP(S) GET /api/hosts/{host_id}/sessions/{name}/thumbnail.svg
   |  HTTP(S) GET /api/hosts/{host_id}/completions/path         -> dir autocomplete
-  |  HTTP(S) + WebSocket /terminal/{host_id}/{name}/...        -> reverse proxy to ttyd
+  |  WebSocket /ws/hosts/{host_id}/sessions/{name}             -> control bridge
   v
 server.py  (aiohttp, port 7680, optional TLS)
   |
   +-- host_config.py    (JSON host persistence)
   +-- session_manager.py
   |     +-- polls `tmux list-sessions` per host (local or via SSH)
-  |     +-- spawns local ttyd per session (direct tmux or ssh + tmux attach)
   |     +-- captures pane text for thumbnails (local or via SSH)
-  |     +-- kills ttyd when session disappears
+  |
+  +-- control_bridge.py
+  |     +-- spawns `tmux -CC attach` per session view
+  |     +-- parses control mode protocol (output, layout, window events)
+  |     +-- relays per-pane output as binary WebSocket frames
   |
   +-- static/
         index.html, app.js, style.css
 ```
 
-Each tmux session gets its own local `ttyd` process on a port from the pool. For remote hosts, ttyd execs `ssh <alias> tmux -u attach-session -t <name>` instead of attaching directly. The dashboard reverse-proxies all traffic through `/terminal/{host_id}/{session_name}/`.
+The browser opens a WebSocket to the control bridge when viewing a session. The bridge spawns `tmux -CC attach -t <session>` and parses the control mode protocol to demultiplex per-pane output and layout changes. Each pane is rendered as an independent xterm.js terminal in the browser, enabling native text selection without modifier keys. For remote hosts, the bridge runs `ssh <alias> tmux -CC attach -t <name>`.
 
 ## Service Management
 
