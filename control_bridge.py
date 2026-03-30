@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import pty
 import re
+import tty
 from dataclasses import dataclass
 from typing import AsyncIterator
 
@@ -64,8 +67,10 @@ def parse_layout(layout_str: str) -> list[PaneGeometry]:
 
 # Regex for the "WxH,X,Y" prefix of every layout node.
 _GEOM_RE = re.compile(r"(\d+)x(\d+),(\d+),(\d+)")
-# Regex for a pane-id leaf: "%N"
-_PANE_ID_RE = re.compile(r"%(\d+)")
+# Regex for a pane-id leaf: bare digits in layout strings (tmux uses plain
+# numeric IDs in layout notation; the "%N" form only appears in control mode
+# notifications like %output).
+_PANE_ID_RE = re.compile(r"(\d+)")
 
 
 def _parse_node(s: str, out: list[PaneGeometry]) -> int:
@@ -89,8 +94,10 @@ def _parse_node(s: str, out: list[PaneGeometry]) -> int:
             pos += 1
     elif pos < len(s) and s[pos] == ",":
         pos += 1
-        if pos < len(s) and s[pos] == "%":
-            # Leaf node: %pane_id
+        if pos < len(s) and (s[pos].isdigit() or s[pos] == "%"):
+            # Leaf node: pane_id — bare "104" (real tmux) or "%104" (legacy).
+            if s[pos] == "%":
+                pos += 1  # skip the % prefix
             m2 = _PANE_ID_RE.match(s, pos)
             if not m2:
                 raise ValueError(f"Expected pane id at: {s[pos:]!r}")
@@ -138,7 +145,9 @@ def parse_control_line(line: str) -> dict | None:
 
     if notification == "%layout-change" and len(parts) >= 3:
         window_id = parts[1]
-        layout_str = parts[2]
+        # parts[2] contains: LAYOUT [VISIBLE_LAYOUT] [FLAGS]
+        # We only need the first space-delimited token (the window layout).
+        layout_str = parts[2].split(" ", 1)[0]
         try:
             panes = parse_layout(layout_str)
         except Exception:
@@ -185,6 +194,10 @@ def parse_control_line(line: str) -> dict | None:
 class ControlBridge:
     """Manages a single ``tmux -CC attach -t <session>`` subprocess.
 
+    tmux 3.6+ requires a TTY on stdin for control mode (``tcgetattr``).  We
+    allocate a PTY pair, pass the slave to tmux, and perform all I/O through
+    the master fd.
+
     Parses control mode protocol lines and emits structured events.
     Accepts commands to send to tmux stdin.
 
@@ -204,6 +217,10 @@ class ControlBridge:
         await bridge.stop()
     """
 
+    # tmux wraps control mode output in a DCS envelope when the outer fd is a
+    # terminal.  The prefix appears exactly once, at the start of the stream.
+    _DCS_PREFIX = "\x1bP1000p"
+
     def __init__(
         self,
         session_name: str,
@@ -222,12 +239,23 @@ class ControlBridge:
         self._process: asyncio.subprocess.Process | None = None
         self._event_queue: asyncio.Queue[dict] = asyncio.Queue()
         self._reader_task: asyncio.Task | None = None
+        # PTY master fd — used for reading tmux output and writing commands.
+        self._master_fd: int | None = None
+        # Async reader wrapping _master_fd for non-blocking line reads.
+        self._pty_reader: asyncio.StreamReader | None = None
+        self._pty_transport: asyncio.BaseTransport | None = None
 
     async def start(self) -> None:
-        """Spawn the tmux -CC subprocess and begin reading stdout."""
+        """Spawn the tmux -CC subprocess with a PTY and begin reading output."""
+        # Allocate a PTY so tmux's tcgetattr() succeeds on stdin.
+        master_fd, slave_fd = pty.openpty()
+        tty.setraw(slave_fd)
+        self._master_fd = master_fd
+
         if self.ssh_alias:
             cmd = [
                 "ssh",
+                "-t",  # force remote PTY for the remote tmux process
                 "-o", "BatchMode=yes",
                 "-o", f"ConnectTimeout={self.ssh_connect_timeout}",
                 self.ssh_alias,
@@ -238,10 +266,22 @@ class ControlBridge:
 
         self._process = await asyncio.create_subprocess_exec(
             *cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
+            stdin=slave_fd,
+            stdout=slave_fd,
             stderr=asyncio.subprocess.DEVNULL,
         )
+        os.close(slave_fd)
+
+        # Wrap master_fd in an asyncio StreamReader for non-blocking line reads.
+        loop = asyncio.get_running_loop()
+        self._pty_reader = asyncio.StreamReader()
+        protocol = asyncio.StreamReaderProtocol(self._pty_reader)
+        read_fd = os.dup(master_fd)
+        self._pty_transport, _ = await loop.connect_read_pipe(
+            lambda: protocol,
+            os.fdopen(read_fd, "rb", 0),
+        )
+
         self._reader_task = asyncio.create_task(
             self._read_loop(), name=f"bridge-reader-{self.session_name}"
         )
@@ -249,11 +289,17 @@ class ControlBridge:
         await self.resize(self.cols, self.rows)
 
     async def _read_loop(self) -> None:
-        """Read stdout line by line and push parsed events to the queue."""
-        assert self._process and self._process.stdout
+        """Read PTY output line by line and push parsed events to the queue."""
+        assert self._pty_reader is not None
+        first_line = True
         try:
-            async for raw_line in self._process.stdout:
-                line = raw_line.decode("utf-8", errors="replace").rstrip("\n")
+            async for raw_line in self._pty_reader:
+                line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+                # Strip DCS envelope prefix from the first control mode line.
+                if first_line:
+                    if line.startswith(self._DCS_PREFIX):
+                        line = line[len(self._DCS_PREFIX):]
+                    first_line = False
                 event = parse_control_line(line)
                 if event:
                     await self._event_queue.put(event)
@@ -270,13 +316,15 @@ class ControlBridge:
             if event["type"] == "exit":
                 return
 
-    # ---- commands sent to tmux stdin ----
+    # ---- commands sent to tmux via PTY master ----
 
     async def _send_command(self, cmd: str) -> None:
-        """Write a single command line to tmux stdin."""
-        if self._process and self._process.stdin and not self._process.stdin.is_closing():
-            self._process.stdin.write((cmd + "\n").encode())
-            await self._process.stdin.drain()
+        """Write a single command line to tmux via the PTY master fd."""
+        if self._master_fd is not None:
+            try:
+                os.write(self._master_fd, (cmd + "\n").encode())
+            except OSError:
+                pass  # PTY closed or process dead — stop() will clean up.
 
     async def send_keys(self, pane_id: str, data: bytes) -> None:
         """Forward raw bytes from the browser to a specific pane via hex encoding."""
@@ -294,13 +342,17 @@ class ControlBridge:
         await self._send_command(f"refresh-client -C {cols},{rows}")
 
     async def stop(self) -> None:
-        """Terminate the subprocess and cancel the reader task."""
+        """Terminate the subprocess and release PTY resources."""
         if self._reader_task and not self._reader_task.done():
             self._reader_task.cancel()
             try:
                 await self._reader_task
             except asyncio.CancelledError:
                 pass
+        if self._pty_transport:
+            self._pty_transport.close()
+            self._pty_transport = None
+            self._pty_reader = None
         if self._process:
             try:
                 self._process.terminate()
@@ -310,3 +362,9 @@ class ControlBridge:
                     self._process.kill()
                 except ProcessLookupError:
                     pass
+        if self._master_fd is not None:
+            try:
+                os.close(self._master_fd)
+            except OSError:
+                pass
+            self._master_fd = None

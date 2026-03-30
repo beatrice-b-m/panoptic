@@ -214,3 +214,47 @@ class TestParseControlLine:
         """A %layout-change with unparseable layout string returns None."""
         line = "%layout-change @0 this-is-not-a-layout"
         assert parse_control_line(line) is None
+
+
+
+class TestParseLayoutBareIds:
+    """Layout strings from real tmux 3.6+ use bare numeric pane IDs."""
+
+    def test_single_pane_bare_id(self):
+        layout = "ab0b,120x40,0,0,104"
+        panes = parse_layout(layout)
+        assert len(panes) == 1
+        assert panes[0] == PaneGeometry(pane_id="%104", cols=120, rows=40, x=0, y=0)
+
+    def test_two_pane_vertical_bare(self):
+        layout = "5f2d,220x50,0,0[220x25,0,0,0,220x24,0,26,1]"
+        panes = parse_layout(layout)
+        assert len(panes) == 2
+        assert panes[0].pane_id == "%0"
+        assert panes[1].pane_id == "%1"
+
+    def test_nested_bare(self):
+        layout = "e1f3,220x50,0,0[220x25,0,0,0,220x24,0,26{110x24,0,26,1,109x24,111,26,2}]"
+        panes = parse_layout(layout)
+        assert len(panes) == 3
+        assert [p.pane_id for p in panes] == ["%0", "%1", "%2"]
+
+
+class TestLayoutChangeWithTrailingTokens:
+    """Real %layout-change lines include visible layout and window flags."""
+
+    def test_layout_with_visible_and_flags(self):
+        # Real tmux 3.6 output: LAYOUT VISIBLE_LAYOUT FLAGS
+        line = "%layout-change @59 ab0b,120x40,0,0,104 ab0b,120x40,0,0,104 *"
+        event = parse_control_line(line)
+        assert event is not None
+        assert event["type"] == "layout"
+        assert event["window_id"] == "@59"
+        assert len(event["panes"]) == 1
+        assert event["panes"][0]["pane_id"] == "%104"
+
+    def test_layout_visible_only(self):
+        line = "%layout-change @0 5f2d,220x50,0,0[220x25,0,0,0,220x24,0,26,1] 5f2d,220x50,0,0[220x25,0,0,0,220x24,0,26,1]"
+        event = parse_control_line(line)
+        assert event is not None
+        assert len(event["panes"]) == 2
