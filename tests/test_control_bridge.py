@@ -428,3 +428,58 @@ class TestReadLoopResponseTracking:
         ]
         events = asyncio.run(_feed_lines(bridge, lines))
         assert events == []
+
+
+class TestTriggerInitialRedraw:
+    """Tests for the resize-bounce initial-redraw trigger."""
+
+    def test_sends_two_refresh_client_commands(self):
+        """trigger_initial_redraw sends a +1-column bounce then a restore."""
+        bridge = _make_bridge()  # cols=80, rows=24
+        commands: list[str] = []
+
+        async def _run() -> None:
+            original = bridge._send_command
+
+            async def _capture(cmd: str) -> int:
+                commands.append(cmd)
+                return await original(cmd)
+
+            bridge._send_command = _capture  # type: ignore[method-assign]
+            await bridge.trigger_initial_redraw()
+
+        asyncio.run(_run())
+        assert commands == ["refresh-client -C 81,24", "refresh-client -C 80,24"]
+
+    def test_second_call_is_no_op(self):
+        """trigger_initial_redraw is idempotent: a second call sends nothing."""
+        bridge = _make_bridge()
+        commands: list[str] = []
+
+        async def _run() -> None:
+            original = bridge._send_command
+
+            async def _capture(cmd: str) -> int:
+                commands.append(cmd)
+                return await original(cmd)
+
+            bridge._send_command = _capture  # type: ignore[method-assign]
+            await bridge.trigger_initial_redraw()
+            await bridge.trigger_initial_redraw()  # second call — must be no-op
+
+        asyncio.run(_run())
+        assert len(commands) == 2  # only the two from the first call
+
+    def test_bridge_dimensions_unchanged_after_call(self):
+        """trigger_initial_redraw does not permanently alter bridge.cols/rows."""
+        bridge = _make_bridge()  # cols=80, rows=24
+        asyncio.run(bridge.trigger_initial_redraw())
+        assert bridge.cols == 80
+        assert bridge.rows == 24
+
+    def test_cmd_counter_advances_by_two(self):
+        """Each refresh-client command occupies one sequence number."""
+        bridge = _make_bridge()
+        before = bridge._cmd_counter
+        asyncio.run(bridge.trigger_initial_redraw())
+        assert bridge._cmd_counter == before + 2

@@ -252,6 +252,8 @@ class ControlBridge:
         self._in_response: bool = False
         self._response_lines: list[str] = []
         self._response_cmd_num: int = -1
+        # Guard: trigger_initial_redraw() only fires once per bridge instance.
+        self._initial_redraw_done: bool = False
 
     async def start(self) -> None:
         """Spawn the tmux -CC subprocess with a PTY and begin reading output."""
@@ -396,6 +398,31 @@ class ControlBridge:
             num = await self._send_command(f"capture-pane -p -e -t {pane_id}")
             self._capture_targets[num] = pane_id
 
+
+    async def trigger_initial_redraw(self) -> None:
+        """Bounce the client width by +1 column to force tmux to re-emit all pane content.
+
+        Sends ``refresh-client -C {cols+1},{rows}`` immediately followed by
+        ``refresh-client -C {cols},{rows}``.  The size change causes tmux to
+        re-render every visible pane and emit ``%output`` events carrying the
+        full current screen state — cursor position, alternate-screen buffers,
+        and SGR attributes — as a genuine VT100 stream.  xterm.js interprets
+        this correctly regardless of what the pane was running.
+
+        ``SIGWINCH`` is delivered to all pane foreground processes so they
+        redraw.  This does not clear scroll history.
+
+        Idempotent: the bounce is sent at most once per bridge instance.
+        Subsequent calls are silent no-ops.
+        """
+        if self._initial_redraw_done:
+            return
+        self._initial_redraw_done = True
+        # Step 1: report one extra column — tmux re-renders and emits %output.
+        # Step 2: restore actual dimensions — tmux re-renders again at the
+        #          correct size, overwriting the +1-column artefacts.
+        await self._send_command(f"refresh-client -C {self.cols + 1},{self.rows}")
+        await self._send_command(f"refresh-client -C {self.cols},{self.rows}")
     async def send_keys(self, pane_id: str, data: bytes) -> None:
         """Forward raw bytes from the browser to a specific pane via hex encoding."""
         hex_bytes = " ".join(f"{b:02x}" for b in data)

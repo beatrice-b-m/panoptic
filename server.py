@@ -803,6 +803,12 @@ async def handle_terminal_ws(request: web.Request) -> web.WebSocketResponse:
                         if new_ids:
                             captured_panes.update(new_ids)
                             await bridge.capture_panes(new_ids)
+                            # Bounce the declared client size by +1 column so
+                            # tmux re-emits every pane's full screen state as
+                            # genuine %output events.  This fills terminals
+                            # running TUI apps (vim, htop, …) whose content
+                            # capture-pane cannot reproduce accurately.
+                            await bridge.trigger_initial_redraw()
 
         relay_task = asyncio.create_task(relay_events())
 
