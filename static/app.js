@@ -480,6 +480,82 @@ async function openSession(sessionName) {
     await loadSessionTerminal(sessionName);
 }
 
+
+/**
+ * Build a coordinate mapping that collapses tmux separator cells out of the
+ * visual layout. Tmux inserts a 1-cell gap between adjacent panes; without
+ * this mapping those gaps produce visible empty bands in the browser.
+ *
+ * Approach: each pane extends by half a cell into its adjacent separator gaps.
+ * This is per-pane so it correctly handles layouts where a separator exists
+ * only in part of the window (e.g. left full-height, right split top/bottom).
+ *
+ * Returns an object with:
+ *   paneRect(p) -> {left, top, width, height} in CSS percentages
+ *   dividerPos(axis, pos, spanStart, spanEnd) -> CSS percentages for a divider
+ */
+function buildVisualMap(paneList, maxCols, maxRows) {
+    // Collect separator positions from pane adjacency.
+    const sepXs = new Set();
+    const sepYs = new Set();
+    for (let i = 0; i < paneList.length; i++) {
+        const a = paneList[i];
+        for (let j = i + 1; j < paneList.length; j++) {
+            const b = paneList[j];
+            const aR = a.x + a.cols, bR = b.x + b.cols;
+            const aB = a.y + a.rows, bB = b.y + b.rows;
+            if (aR + 1 === b.x) sepXs.add(aR);
+            else if (bR + 1 === a.x) sepXs.add(bR);
+            if (aB + 1 === b.y) sepYs.add(aB);
+            else if (bB + 1 === a.y) sepYs.add(bB);
+        }
+    }
+
+    return {
+        paneRect(p) {
+            // Extend the pane by 0.5 cells into each adjacent separator gap.
+            const pRight = p.x + p.cols;
+            const pBottom = p.y + p.rows;
+
+            let vLeft = p.x;
+            let vRight = pRight;
+            let vTop = p.y;
+            let vBottom = pBottom;
+
+            // Left edge: if a separator sits at x-1, absorb its right half.
+            if (p.x > 0 && sepXs.has(p.x - 1)) vLeft -= 0.5;
+            // Right edge: if a separator sits at pRight, absorb its left half.
+            if (pRight < maxCols && sepXs.has(pRight)) vRight += 0.5;
+            // Top edge: if a separator sits at y-1, absorb its bottom half.
+            if (p.y > 0 && sepYs.has(p.y - 1)) vTop -= 0.5;
+            // Bottom edge: if a separator sits at pBottom, absorb its top half.
+            if (pBottom < maxRows && sepYs.has(pBottom)) vBottom += 0.5;
+
+            return {
+                left: (vLeft / maxCols) * 100,
+                top: (vTop / maxRows) * 100,
+                width: ((vRight - vLeft) / maxCols) * 100,
+                height: ((vBottom - vTop) / maxRows) * 100,
+            };
+        },
+        dividerPos(axis, pos, spanStart, spanEnd) {
+            // Divider sits at the midpoint of the separator cell.
+            if (axis === 'vertical') {
+                return {
+                    left: ((pos + 0.5) / maxCols) * 100,
+                    top: (spanStart / maxRows) * 100,
+                    span: ((spanEnd - spanStart) / maxRows) * 100,
+                };
+            } else {
+                return {
+                    top: ((pos + 0.5) / maxRows) * 100,
+                    left: (spanStart / maxCols) * 100,
+                    span: ((spanEnd - spanStart) / maxCols) * 100,
+                };
+            }
+        },
+    };
+}
 function applyLayout(paneList, paneMap, gridEl) {
     // Determine total grid dimensions from max extents.
     let maxCols = 0, maxRows = 0;
@@ -489,11 +565,15 @@ function applyLayout(paneList, paneMap, gridEl) {
     }
     if (maxCols === 0 || maxRows === 0) return;
 
+    // Build coordinate mapping that collapses tmux separator gaps.
+    const vis = buildVisualMap(paneList, maxCols, maxRows);
+
     // Store layout metadata for divider calculations.
     if (_paneGrid) {
         _paneGrid.layout = paneList;
         _paneGrid.maxCols = maxCols;
         _paneGrid.maxRows = maxRows;
+        _paneGrid.vis = vis;
     }
 
     const incomingIds = new Set(paneList.map(p => p.pane_id));
@@ -580,11 +660,8 @@ function applyLayout(paneList, paneMap, gridEl) {
         }
 
         // Position the pane cell using absolute positioning within the grid.
-        const left = (p.x / maxCols) * 100;
-        const top = (p.y / maxRows) * 100;
-        const width = (p.cols / maxCols) * 100;
-        const height = (p.rows / maxRows) * 100;
-        entry.el.style.cssText = `position:absolute;left:${left}%;top:${top}%;width:${width}%;height:${height}%;`;
+        const r = vis.paneRect(p);
+        entry.el.style.cssText = `position:absolute;left:${r.left}%;top:${r.top}%;width:${r.width}%;height:${r.height}%;`;
 
         // Refit terminal to new dimensions.
         requestAnimationFrame(() => {
@@ -593,7 +670,7 @@ function applyLayout(paneList, paneMap, gridEl) {
     }
 
     // Render draggable dividers between adjacent panes.
-    renderDividers(paneList, maxCols, maxRows, gridEl);
+    renderDividers(paneList, gridEl, vis);
 }
 
 
@@ -612,33 +689,23 @@ const DIVIDER_HALF_PX = 3;
  * A divider exists where one pane's right edge equals another's left edge
  * (vertical) or one pane's bottom edge equals another's top edge (horizontal).
  */
-function renderDividers(paneList, maxCols, maxRows, gridEl) {
+function renderDividers(paneList, gridEl, vis) {
     // Remove stale dividers.
     gridEl.querySelectorAll('.pane-divider').forEach(el => el.remove());
 
     if (paneList.length < 2) return;
 
-    // Build edge maps: for each coordinate, which panes border it.
-    // Vertical dividers: shared x-boundary between left-pane's right edge and right-pane's left edge.
-    // Horizontal dividers: shared y-boundary between top-pane's bottom edge and bottom-pane's top edge.
     const dividers = findDividers(paneList);
 
     for (const d of dividers) {
         const el = document.createElement('div');
         el.className = `pane-divider pane-divider-${d.axis}`;
+        const vp = vis.dividerPos(d.axis, d.pos, d.spanStart, d.spanEnd);
 
         if (d.axis === 'vertical') {
-            // Positioned at x-boundary, spanning the y-range.
-            const leftPct = (d.pos / maxCols) * 100;
-            const topPct = (d.spanStart / maxRows) * 100;
-            const heightPct = ((d.spanEnd - d.spanStart) / maxRows) * 100;
-            el.style.cssText = `left:${leftPct}%;top:${topPct}%;width:0;height:${heightPct}%;`;
+            el.style.cssText = `left:${vp.left}%;top:${vp.top}%;width:0;height:${vp.span}%;`;
         } else {
-            // Positioned at y-boundary, spanning the x-range.
-            const topPct = (d.pos / maxRows) * 100;
-            const leftPct = (d.spanStart / maxCols) * 100;
-            const widthPct = ((d.spanEnd - d.spanStart) / maxCols) * 100;
-            el.style.cssText = `top:${topPct}%;left:${leftPct}%;height:0;width:${widthPct}%;`;
+            el.style.cssText = `top:${vp.top}%;left:${vp.left}%;height:0;width:${vp.span}%;`;
         }
 
         el.addEventListener('mousedown', (e) => startDividerDrag(e, d));
@@ -734,8 +801,8 @@ function startDividerDrag(mousedownEvent, divider) {
 
     const gridEl = _paneGrid.gridEl;
     const gridRect = gridEl.getBoundingClientRect();
-    const { charWidth, charHeight, layout, maxCols, maxRows, panes } = _paneGrid;
-    if (!layout || !charWidth || !charHeight) return;
+    const { charWidth, charHeight, layout, maxCols, maxRows, panes, vis } = _paneGrid;
+    if (!layout || !charWidth || !charHeight || !vis) return;
 
     // Build a mutable copy of the layout for local preview.
     const localLayout = layout.map(p => ({ ...p }));
@@ -791,14 +858,13 @@ function startDividerDrag(mousedownEvent, divider) {
         }
 
         // Re-render pane positions locally (no server round-trip).
+        // Rebuild vis for updated local geometry.
+        const localVis = buildVisualMap(localLayout, maxCols, maxRows);
         for (const p of localLayout) {
             const entry = panes.get(p.pane_id);
             if (!entry) continue;
-            const left = (p.x / maxCols) * 100;
-            const top = (p.y / maxRows) * 100;
-            const width = (p.cols / maxCols) * 100;
-            const height = (p.rows / maxRows) * 100;
-            entry.el.style.cssText = `position:absolute;left:${left}%;top:${top}%;width:${width}%;height:${height}%;`;
+            const r = localVis.paneRect(p);
+            entry.el.style.cssText = `position:absolute;left:${r.left}%;top:${r.top}%;width:${r.width}%;height:${r.height}%;`;
         }
 
         // Refit terminals affected by the drag.
@@ -808,10 +874,12 @@ function startDividerDrag(mousedownEvent, divider) {
         }
 
         // Move the divider element too.
+        const dp = localVis.dividerPos(
+            divider.axis, divider.pos + accumDelta, divider.spanStart, divider.spanEnd);
         if (isVertical) {
-            dividerEl.style.left = `${(divider.pos + accumDelta) / maxCols * 100}%`;
+            dividerEl.style.left = `${dp.left}%`;
         } else {
-            dividerEl.style.top = `${(divider.pos + accumDelta) / maxRows * 100}%`;
+            dividerEl.style.top = `${dp.top}%`;
         }
     }
 
