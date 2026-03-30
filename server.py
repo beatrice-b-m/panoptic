@@ -762,6 +762,7 @@ async def handle_terminal_ws(request: web.Request) -> web.WebSocketResponse:
 
         async def relay_events():
             """Push bridge events to the browser."""
+            captured_panes: set[str] = set()
             async for event in bridge.events():
                 if ws.closed:
                     break
@@ -781,6 +782,18 @@ async def handle_terminal_ws(request: web.Request) -> web.WebSocketResponse:
                 else:
                     # layout, window_add, window_close, etc. — JSON text frame
                     await ws.send_str(json.dumps(event))
+                    # After forwarding a layout event, capture initial content
+                    # for any panes the browser hasn't seen yet.  The captured
+                    # text arrives as synthetic output events on subsequent
+                    # iterations, filling the freshly-created xterm.js instances.
+                    if event["type"] == "layout":
+                        new_ids = [
+                            p["pane_id"] for p in event["panes"]
+                            if p["pane_id"] not in captured_panes
+                        ]
+                        if new_ids:
+                            captured_panes.update(new_ids)
+                            await bridge.capture_panes(new_ids)
 
         relay_task = asyncio.create_task(relay_events())
 

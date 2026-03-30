@@ -245,6 +245,14 @@ class ControlBridge:
         self._pty_reader: asyncio.StreamReader | None = None
         self._pty_transport: asyncio.BaseTransport | None = None
 
+        # Command-response tracking for capture-pane initial content.
+        # tmux numbers commands from 0, incrementing per command received.
+        self._cmd_counter: int = 0
+        self._capture_targets: dict[int, str] = {}  # cmd_num -> pane_id
+        self._in_response: bool = False
+        self._response_lines: list[str] = []
+        self._response_cmd_num: int = -1
+
     async def start(self) -> None:
         """Spawn the tmux -CC subprocess with a PTY and begin reading output."""
         # Allocate a PTY so tmux's tcgetattr() succeeds on stdin.
@@ -289,7 +297,19 @@ class ControlBridge:
         await self.resize(self.cols, self.rows)
 
     async def _read_loop(self) -> None:
-        """Read PTY output line by line and push parsed events to the queue."""
+        """Read PTY output line by line and push parsed events to the queue.
+
+        Handles tmux command responses (``%begin`` / ``%end`` blocks) in
+        addition to asynchronous notifications.  Lines starting with ``%`` are
+        always protocol messages — either response delimiters or notifications.
+        All other lines between ``%begin`` and ``%end`` are command response
+        text.  Notifications can be interleaved with command responses and are
+        forwarded normally regardless of response state.
+
+        Capture-pane responses (tracked via ``_capture_targets``) are emitted
+        as synthetic ``output`` events so the browser receives initial pane
+        content.
+        """
         assert self._pty_reader is not None
         first_line = True
         try:
@@ -300,9 +320,45 @@ class ControlBridge:
                     if line.startswith(self._DCS_PREFIX):
                         line = line[len(self._DCS_PREFIX):]
                     first_line = False
-                event = parse_control_line(line)
-                if event:
-                    await self._event_queue.put(event)
+
+                if line.startswith("%"):
+                    # Protocol message: delimiter or notification.
+                    if line.startswith("%begin "):
+                        self._in_response = True
+                        self._response_lines = []
+                        parts = line.split()
+                        try:
+                            self._response_cmd_num = int(parts[2]) if len(parts) >= 3 else -1
+                        except ValueError:
+                            self._response_cmd_num = -1
+                        continue
+
+                    if line.startswith("%end ") or line.startswith("%error "):
+                        if self._in_response and self._response_cmd_num in self._capture_targets:
+                            pane_id = self._capture_targets.pop(self._response_cmd_num)
+                            if line.startswith("%end ") and self._response_lines:
+                                # Emit captured content as a synthetic output event.
+                                text = "\r\n".join(self._response_lines) + "\r\n"
+                                await self._event_queue.put({
+                                    "type": "output",
+                                    "pane_id": pane_id,
+                                    "data": text.encode("utf-8"),
+                                })
+                        self._in_response = False
+                        self._response_lines = []
+                        self._response_cmd_num = -1
+                        continue
+
+                    # Any other %-prefixed line is a notification — process it
+                    # normally even if we are inside a command response block.
+                    event = parse_control_line(line)
+                    if event:
+                        await self._event_queue.put(event)
+                else:
+                    # Non-% line: if we are inside a response block, accumulate
+                    # it as response text.  Otherwise ignore stray lines.
+                    if self._in_response:
+                        self._response_lines.append(line)
         except Exception as exc:
             log.exception("ControlBridge reader error: %s", exc)
         finally:
@@ -318,13 +374,27 @@ class ControlBridge:
 
     # ---- commands sent to tmux via PTY master ----
 
-    async def _send_command(self, cmd: str) -> None:
-        """Write a single command line to tmux via the PTY master fd."""
+    async def _send_command(self, cmd: str) -> int:
+        """Write a command line to tmux and return its sequence number."""
+        num = self._cmd_counter
+        self._cmd_counter += 1
         if self._master_fd is not None:
             try:
                 os.write(self._master_fd, (cmd + "\n").encode())
             except OSError:
                 pass  # PTY closed or process dead — stop() will clean up.
+        return num
+
+    async def capture_panes(self, pane_ids: list[str]) -> None:
+        """Request initial content capture for the given panes.
+
+        Sends ``capture-pane -p -e`` for each pane.  The read loop tracks the
+        command responses and emits synthetic ``output`` events so the browser
+        receives the current visible content of each pane.
+        """
+        for pane_id in pane_ids:
+            num = await self._send_command(f"capture-pane -p -e -t {pane_id}")
+            self._capture_targets[num] = pane_id
 
     async def send_keys(self, pane_id: str, data: bytes) -> None:
         """Forward raw bytes from the browser to a specific pane via hex encoding."""

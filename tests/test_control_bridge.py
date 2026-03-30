@@ -258,3 +258,173 @@ class TestLayoutChangeWithTrailingTokens:
         event = parse_control_line(line)
         assert event is not None
         assert len(event["panes"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# ControlBridge._read_loop — command-response tracking
+# ---------------------------------------------------------------------------
+
+
+import asyncio
+from control_bridge import ControlBridge
+
+
+def _make_bridge() -> ControlBridge:
+    """Create a ControlBridge without starting a subprocess."""
+    return ControlBridge("test-session", cols=80, rows=24, tmux_path="tmux")
+
+
+async def _feed_lines(bridge: ControlBridge, lines: list[str]) -> list[dict]:
+    """Feed raw lines into the bridge's reader and collect all queued events.
+
+    Sets up a StreamReader, feeds data, runs the read loop, and drains the
+    event queue.  Returns all events except the final ``exit`` sentinel.
+    """
+    reader = asyncio.StreamReader()
+    for line in lines:
+        reader.feed_data((line + "\n").encode("utf-8"))
+    reader.feed_eof()
+
+    bridge._pty_reader = reader
+    await bridge._read_loop()
+
+    events: list[dict] = []
+    while not bridge._event_queue.empty():
+        ev = bridge._event_queue.get_nowait()
+        if ev["type"] != "exit":
+            events.append(ev)
+    return events
+
+
+class TestReadLoopResponseTracking:
+    """Tests for %begin/%end handling and capture-pane synthetic output."""
+
+    def test_non_capture_response_is_discarded(self):
+        """Commands that aren't capture-pane produce no events from their response."""
+        bridge = _make_bridge()
+        bridge._cmd_counter = 1  # resize already sent
+        lines = [
+            "%begin 1000 0 0",
+            "%end 1000 0 0",
+        ]
+        events = asyncio.run(_feed_lines(bridge, lines))
+        assert events == []
+
+    def test_capture_pane_emits_output(self):
+        """capture-pane response is emitted as a synthetic output event."""
+        bridge = _make_bridge()
+        bridge._cmd_counter = 2
+        bridge._capture_targets[1] = "%0"
+        lines = [
+            # Response to resize (cmd 0) — empty, should be ignored.
+            "%begin 1000 0 0",
+            "%end 1000 0 0",
+            # Response to capture-pane (cmd 1).
+            "%begin 1001 1 0",
+            "\x1b[1muser@host\x1b[0m:~$",
+            "some output line",
+            "%end 1001 1 0",
+        ]
+        events = asyncio.run(_feed_lines(bridge, lines))
+        assert len(events) == 1
+        ev = events[0]
+        assert ev["type"] == "output"
+        assert ev["pane_id"] == "%0"
+        expected = "\x1b[1muser@host\x1b[0m:~$\r\nsome output line\r\n"
+        assert ev["data"] == expected.encode("utf-8")
+
+    def test_capture_error_produces_no_output(self):
+        """If capture-pane fails (%error), no synthetic output is emitted."""
+        bridge = _make_bridge()
+        bridge._cmd_counter = 1
+        bridge._capture_targets[0] = "%99"
+        lines = [
+            "%begin 1000 0 0",
+            "can't find pane %99",
+            "%error 1000 0 0",
+        ]
+        events = asyncio.run(_feed_lines(bridge, lines))
+        assert events == []
+        assert 0 not in bridge._capture_targets  # cleaned up
+
+    def test_interleaved_notification_during_response(self):
+        """Notifications interleaved with a command response are forwarded."""
+        bridge = _make_bridge()
+        bridge._cmd_counter = 1
+        bridge._capture_targets[0] = "%0"
+        lines = [
+            "%begin 1000 0 0",
+            "captured line 1",
+            "%output %1 new\\040output",  # notification interleaved
+            "captured line 2",
+            "%end 1000 0 0",
+        ]
+        events = asyncio.run(_feed_lines(bridge, lines))
+        # Should have: the interleaved %output AND the capture synthetic output.
+        assert len(events) == 2
+        # Interleaved notification comes first (it's processed inline).
+        assert events[0]["type"] == "output"
+        assert events[0]["pane_id"] == "%1"
+        # Capture synthetic output comes after the %end.
+        assert events[1]["type"] == "output"
+        assert events[1]["pane_id"] == "%0"
+        assert events[1]["data"] == b"captured line 1\r\ncaptured line 2\r\n"
+
+    def test_layout_events_pass_through_normally(self):
+        """Layout events are queued normally, not swallowed by response tracking."""
+        bridge = _make_bridge()
+        lines = [
+            "%layout-change @0 d203,80x24,0,0,0",
+        ]
+        events = asyncio.run(_feed_lines(bridge, lines))
+        assert len(events) == 1
+        assert events[0]["type"] == "layout"
+        assert events[0]["panes"][0]["pane_id"] == "%0"
+
+    def test_dcs_prefix_stripped_on_first_line(self):
+        """DCS envelope on the first line is stripped before processing."""
+        bridge = _make_bridge()
+        lines = [
+            "\x1bP1000p%layout-change @0 d203,80x24,0,0,0",
+        ]
+        events = asyncio.run(_feed_lines(bridge, lines))
+        assert len(events) == 1
+        assert events[0]["type"] == "layout"
+
+    def test_multiple_capture_panes(self):
+        """Multiple capture-pane responses each produce separate output events."""
+        bridge = _make_bridge()
+        bridge._cmd_counter = 3  # cmd 0 = resize, 1 = capture %0, 2 = capture %1
+        bridge._capture_targets[1] = "%0"
+        bridge._capture_targets[2] = "%1"
+        lines = [
+            # cmd 0 response (resize)
+            "%begin 1000 0 0",
+            "%end 1000 0 0",
+            # cmd 1 response (capture %0)
+            "%begin 1001 1 0",
+            "pane zero content",
+            "%end 1001 1 0",
+            # cmd 2 response (capture %1)
+            "%begin 1002 2 0",
+            "pane one content",
+            "%end 1002 2 0",
+        ]
+        events = asyncio.run(_feed_lines(bridge, lines))
+        assert len(events) == 2
+        assert events[0]["pane_id"] == "%0"
+        assert events[0]["data"] == b"pane zero content\r\n"
+        assert events[1]["pane_id"] == "%1"
+        assert events[1]["data"] == b"pane one content\r\n"
+
+    def test_empty_capture_response_skipped(self):
+        """A capture-pane with no output lines (empty pane) emits no event."""
+        bridge = _make_bridge()
+        bridge._cmd_counter = 1
+        bridge._capture_targets[0] = "%0"
+        lines = [
+            "%begin 1000 0 0",
+            "%end 1000 0 0",
+        ]
+        events = asyncio.run(_feed_lines(bridge, lines))
+        assert events == []
