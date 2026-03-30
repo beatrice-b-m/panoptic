@@ -43,6 +43,10 @@ const _editedFields = new Set();
 const MACRO_PLACEHOLDER_RE = /\{([^}]*)\}/g;
 const MACRO_VAR_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
+// Reusable UTF-8 decoder for pane-id extraction from binary WebSocket frames.
+// Allocated once at module level to avoid per-frame object churn.
+const _paneIdDecoder = new TextDecoder();
+
 // ---------------------------------------------------------------------------
 // Theme
 // ---------------------------------------------------------------------------
@@ -826,6 +830,9 @@ function startDividerDrag(mousedownEvent, divider) {
     gridEl.classList.add('dragging-divider');
     if (!isVertical) gridEl.classList.add('dragging-divider-horizontal');
 
+    // Track rAF handle for pending fit during drag — non-zero means a fit is queued.
+    let _fitRafId = 0;
+
     function onMouseMove(e) {
         const pixelDelta = isVertical
             ? (e.clientX - startX) - accumDelta * charWidth
@@ -867,10 +874,16 @@ function startDividerDrag(mousedownEvent, divider) {
             entry.el.style.cssText = `position:absolute;left:${r.left}%;top:${r.top}%;width:${r.width}%;height:${r.height}%;`;
         }
 
-        // Refit terminals affected by the drag.
-        for (const p of [...beforePanes, ...afterPanes]) {
-            const entry = panes.get(p.pane_id);
-            if (entry?.fitAddon) entry.fitAddon.fit();
+        // Throttle terminal refit to animation-frame cadence: CSS position above
+        // is immediate for visual feedback; the fit only needs to run once per frame.
+        if (!_fitRafId) {
+            _fitRafId = requestAnimationFrame(() => {
+                _fitRafId = 0;
+                for (const p of [...beforePanes, ...afterPanes]) {
+                    const entry = panes.get(p.pane_id);
+                    if (entry?.fitAddon) entry.fitAddon.fit();
+                }
+            });
         }
 
         // Move the divider element too.
@@ -890,6 +903,16 @@ function startDividerDrag(mousedownEvent, divider) {
         gridEl.classList.remove('dragging-divider');
         gridEl.classList.remove('dragging-divider-horizontal');
 
+        // Cancel any queued rAF fit and do a final synchronous fit so the
+        // terminals are sized correctly before resize_pane messages go out.
+        if (_fitRafId) {
+            cancelAnimationFrame(_fitRafId);
+            _fitRafId = 0;
+            for (const p of [...beforePanes, ...afterPanes]) {
+                const entry = panes.get(p.pane_id);
+                if (entry?.fitAddon) entry.fitAddon.fit();
+            }
+        }
         if (accumDelta === 0) return;
 
         // Send resize commands to tmux for each affected pane.
@@ -1001,18 +1024,27 @@ async function loadSessionTerminal(sessionName) {
 
         ws.addEventListener('open', () => {
             // Resize observer: send resize on container change.
+            // Batched via requestAnimationFrame so rapid window/pane resizes are
+            // coalesced into one resize+fit pass per frame instead of one per event.
+            let _roPending = false;
             const ro = new ResizeObserver(() => {
                 if (!_paneGrid || _paneGrid.ws !== ws) return;
-                const r = gridEl.getBoundingClientRect();
-                const newCols = Math.max(40, Math.floor(r.width / charWidth));
-                const newRows = Math.max(10, Math.floor(r.height / charHeight));
-                if (ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify({ type: 'resize', cols: newCols, rows: newRows }));
-                }
-                // Refit all terminals.
-                for (const p of panes.values()) {
-                    if (p.fitAddon) p.fitAddon.fit();
-                }
+                if (_roPending) return;
+                _roPending = true;
+                requestAnimationFrame(() => {
+                    _roPending = false;
+                    if (!_paneGrid || _paneGrid.ws !== ws) return;
+                    const r = gridEl.getBoundingClientRect();
+                    const newCols = Math.max(40, Math.floor(r.width / charWidth));
+                    const newRows = Math.max(10, Math.floor(r.height / charHeight));
+                    if (ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({ type: 'resize', cols: newCols, rows: newRows }));
+                    }
+                    // Refit all terminals.
+                    for (const p of panes.values()) {
+                        if (p.fitAddon) p.fitAddon.fit();
+                    }
+                });
             });
             ro.observe(gridEl);
             _paneGrid.resizeObserver = ro;
@@ -1039,7 +1071,7 @@ async function loadSessionTerminal(sessionName) {
                 const view = new DataView(evt.data);
                 if (view.getUint8(0) !== 0x01) return;
                 const idLen = view.getUint16(1, false);
-                const paneId = new TextDecoder().decode(new Uint8Array(evt.data, 3, idLen));
+                const paneId = _paneIdDecoder.decode(new Uint8Array(evt.data, 3, idLen));
                 const payload = new Uint8Array(evt.data, 3 + idLen);
 
                 const entry = panes.get(paneId);
@@ -1763,7 +1795,9 @@ function renderPaneCommandEditor(totalPanes) {
         input.value = _paneCommands[0] || '';
         input.addEventListener('input', () => {
             _paneCommands[0] = input.value;
-            updateLayoutPreview();
+            // Update the preview pane indicator without triggering a full DOM rebuild.
+            const paneEl = document.querySelector('.layout-preview-pane[data-pane-index="0"] .pane-index');
+            if (paneEl) paneEl.textContent = input.value ? '\u2713' : '0';
         });
         row.appendChild(label);
         row.appendChild(input);
