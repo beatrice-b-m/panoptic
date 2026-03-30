@@ -639,11 +639,32 @@ button {
     text-overflow: ellipsis;
 }
 
-.terminal-container {
+.pane-grid {
     flex: 1;
     min-height: 0;
     overflow: hidden;
     background: #000;
+    position: relative;
+}
+
+.pane-cell {
+    position: absolute;
+    overflow: hidden;
+    box-sizing: border-box;
+    border: 1px solid transparent;
+    transition: border-color 0.15s;
+}
+
+.pane-cell.active {
+    border-color: var(--accent, hsl(207, 90%, 64%));
+}
+
+.pane-cell .xterm {
+    height: 100%;
+}
+
+.pane-cell .xterm-viewport {
+    overflow: hidden !important;
 }
 
 /* ─── Modal ─────────────────────────────────────────────────────────────────── */

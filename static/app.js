@@ -1,7 +1,10 @@
 // panoptic frontend — vanilla JS, no frameworks
 // All DOM IDs must match index.html exactly.
 
-import { createTerminal } from '/static/terminal.js';
+import { Terminal } from '/static/vendor/xterm/xterm.mjs';
+import { FitAddon } from '/static/vendor/xterm/addon-fit.mjs';
+import { WebglAddon } from '/static/vendor/xterm/addon-webgl.mjs';
+import { WebLinksAddon } from '/static/vendor/xterm/addon-web-links.mjs';
 
 let currentHostId = 'localhost';  // active host tab
 let currentPage = 1;
@@ -9,8 +12,8 @@ let currentSession = null;  // session name while in session view, null for dash
 let sessionPollTimer = null;
 let hostPollTimer = null;
 
-// Active terminal handle (non-null while session view is open).
-let _terminalHandle = null;
+// Per-pane terminal grid state (non-null while session view is open).
+let _paneGrid = null;  // { ws, panes: Map<pane_id, {terminal, fitAddon, el}>, gridEl, resizeObserver, activePaneId }
 
 // Keyed reconciliation state: session name -> card DOM element.
 const _cardMap = new Map();
@@ -477,24 +480,161 @@ async function openSession(sessionName) {
     await loadSessionTerminal(sessionName);
 }
 
-async function loadSessionTerminal(sessionName) {
-    // Dispose any previous terminal before creating a new one.
-    if (_terminalHandle) {
-        _terminalHandle.dispose();
-        _terminalHandle = null;
+function applyLayout(paneList, paneMap, gridEl) {
+    // Determine total grid dimensions from max extents.
+    let maxCols = 0, maxRows = 0;
+    for (const p of paneList) {
+        maxCols = Math.max(maxCols, p.x + p.cols);
+        maxRows = Math.max(maxRows, p.y + p.rows);
+    }
+    if (maxCols === 0 || maxRows === 0) return;
+
+
+    const incomingIds = new Set(paneList.map(p => p.pane_id));
+
+    // Remove panes that no longer exist.
+    for (const [id, entry] of paneMap) {
+        if (!incomingIds.has(id)) {
+            entry.terminal.dispose();
+            entry.el.remove();
+            paneMap.delete(id);
+        }
     }
 
+    // Create or update pane cells.
+    for (const p of paneList) {
+        let entry = paneMap.get(p.pane_id);
+
+        if (!entry) {
+            // Create new pane cell.
+            const el = document.createElement('div');
+            el.className = 'pane-cell';
+            el.dataset.paneId = p.pane_id;
+            gridEl.appendChild(el);
+
+            const terminal = new Terminal({
+                allowProposedApi: true,
+                fontFamily: '"SF Mono", Menlo, Consolas, monospace',
+                fontSize: 13,
+                cursorBlink: true,
+                scrollback: 5000,
+                theme: {
+                    background: '#000000',
+                    selectionBackground: 'rgba(68, 152, 255, 0.35)',
+                    selectionForeground: '#ffffff',
+                },
+            });
+
+            const fitAddon = new FitAddon();
+            terminal.loadAddon(fitAddon);
+            terminal.loadAddon(new WebLinksAddon());
+            terminal.open(el);
+
+            try {
+                const webgl = new WebglAddon();
+                webgl.onContextLoss(() => { webgl.dispose(); });
+                terminal.loadAddon(webgl);
+            } catch { /* WebGL unavailable */ }
+
+            // Keyboard input: forward to bridge.
+            terminal.onData(data => {
+                if (!_paneGrid || _paneGrid.ws.readyState !== WebSocket.OPEN) return;
+                const bytes = new TextEncoder().encode(data);
+                const hex = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+                _paneGrid.ws.send(JSON.stringify({ type: 'input', pane_id: p.pane_id, data: hex }));
+            });
+            terminal.onBinary(data => {
+                if (!_paneGrid || _paneGrid.ws.readyState !== WebSocket.OPEN) return;
+                const hex = Array.from(data, c => c.charCodeAt(0).toString(16).padStart(2, '0')).join('');
+                _paneGrid.ws.send(JSON.stringify({ type: 'input', pane_id: p.pane_id, data: hex }));
+            });
+
+            // Copy-on-select.
+            terminal.onSelectionChange(() => {
+                const sel = terminal.getSelection();
+                if (sel) {
+                    if (navigator.clipboard?.writeText) {
+                        navigator.clipboard.writeText(sel).catch(() => {});
+                    }
+                }
+            });
+
+            // Click to focus pane.
+            el.addEventListener('mousedown', () => {
+                if (_paneGrid && _paneGrid.activePaneId !== p.pane_id) {
+                    setActivePane(p.pane_id, paneMap);
+                    if (_paneGrid.ws.readyState === WebSocket.OPEN) {
+                        _paneGrid.ws.send(JSON.stringify({ type: 'select_pane', pane_id: p.pane_id }));
+                    }
+                }
+            });
+
+            entry = { terminal, fitAddon, el };
+            paneMap.set(p.pane_id, entry);
+        }
+
+        // Position the pane cell using absolute positioning within the grid.
+        const left = (p.x / maxCols) * 100;
+        const top = (p.y / maxRows) * 100;
+        const width = (p.cols / maxCols) * 100;
+        const height = (p.rows / maxRows) * 100;
+        entry.el.style.cssText = `position:absolute;left:${left}%;top:${top}%;width:${width}%;height:${height}%;`;
+
+        // Refit terminal to new dimensions.
+        requestAnimationFrame(() => {
+            if (entry.fitAddon) entry.fitAddon.fit();
+        });
+    }
+}
+
+function setActivePane(paneId, paneMap) {
+    if (!_paneGrid) return;
+    _paneGrid.activePaneId = paneId;
+    for (const [id, entry] of paneMap) {
+        entry.el.classList.toggle('active', id === paneId);
+    }
+    const active = paneMap.get(paneId);
+    if (active) active.terminal.focus();
+}
+
+function disposePaneGrid() {
+    if (!_paneGrid) return;
+
+    if (_paneGrid.resizeObserver) {
+        _paneGrid.resizeObserver.disconnect();
+    }
+
+    if (_paneGrid.ws) {
+        if (_paneGrid.ws.readyState === WebSocket.OPEN ||
+            _paneGrid.ws.readyState === WebSocket.CONNECTING) {
+            _paneGrid.ws.close();
+        }
+    }
+
+    for (const entry of _paneGrid.panes.values()) {
+        entry.terminal.dispose();
+        entry.el.remove();
+    }
+    _paneGrid.panes.clear();
+
+    // Clear any leftover DOM children.
+    _paneGrid.gridEl.replaceChildren();
+
+    _paneGrid = null;
+}
+
+async function loadSessionTerminal(sessionName) {
+    // Dispose any previous pane grid.
+    disposePaneGrid();
+
     const loadEpoch = ++_terminalLoadEpoch;
-    const container = document.getElementById('terminal-container');
+    const gridEl = document.getElementById('pane-grid');
     const hostId = encodeURIComponent(currentHostId);
     const safeName = encodeURIComponent(sessionName);
 
     try {
         const resp = await fetch(`/api/hosts/${hostId}/sessions/${safeName}`);
-
-        // Stale response — user navigated away or opened a different session.
         if (loadEpoch !== _terminalLoadEpoch) return;
-
         if (!resp.ok) {
             showBanner(
                 resp.status === 404
@@ -505,17 +645,97 @@ async function loadSessionTerminal(sessionName) {
         }
 
         const data = await resp.json();
-
-        // Check again after JSON parse (another await boundary).
         if (loadEpoch !== _terminalLoadEpoch) return;
 
-        if (!data.ttyd_url) {
-            showBanner(`Session "${sessionName}" has no terminal available (port not assigned).`);
+        if (!data.ws_url) {
+            showBanner(`Session "${sessionName}" has no terminal endpoint.`);
             return;
         }
 
         hideBanner();
-        _terminalHandle = createTerminal(container, data.ttyd_url);
+
+        // Measure character cell size to compute cols/rows from grid container.
+        const probe = document.createElement('span');
+        probe.style.cssText = 'position:absolute;visibility:hidden;white-space:pre;font-family:"SF Mono",Menlo,Consolas,monospace;font-size:13px;';
+        probe.textContent = 'W';
+        document.body.appendChild(probe);
+        const charWidth = probe.offsetWidth || 8;
+        const charHeight = probe.offsetHeight || 16;
+        probe.remove();
+
+        const rect = gridEl.getBoundingClientRect();
+        const cols = Math.max(40, Math.floor(rect.width / charWidth));
+        const rows = Math.max(10, Math.floor(rect.height / charHeight));
+
+        // Open WebSocket.
+        const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${wsProto}//${location.host}${data.ws_url}?cols=${cols}&rows=${rows}`;
+        const ws = new WebSocket(wsUrl);
+        ws.binaryType = 'arraybuffer';
+
+        const panes = new Map();
+
+        _paneGrid = { ws, panes, gridEl, resizeObserver: null, activePaneId: null };
+
+        ws.addEventListener('open', () => {
+            // Resize observer: send resize on container change.
+            const ro = new ResizeObserver(() => {
+                if (!_paneGrid || _paneGrid.ws !== ws) return;
+                const r = gridEl.getBoundingClientRect();
+                const newCols = Math.max(40, Math.floor(r.width / charWidth));
+                const newRows = Math.max(10, Math.floor(r.height / charHeight));
+                if (ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: 'resize', cols: newCols, rows: newRows }));
+                }
+                // Refit all terminals.
+                for (const p of panes.values()) {
+                    if (p.fitAddon) p.fitAddon.fit();
+                }
+            });
+            ro.observe(gridEl);
+            _paneGrid.resizeObserver = ro;
+        });
+
+        ws.addEventListener('message', (evt) => {
+            if (typeof evt.data === 'string') {
+                // JSON text frame.
+                let msg;
+                try { msg = JSON.parse(evt.data); } catch { return; }
+
+                if (msg.type === 'layout') {
+                    applyLayout(msg.panes, panes, gridEl);
+                    // Set first pane as active if none selected.
+                    if (!_paneGrid.activePaneId && msg.panes.length > 0) {
+                        setActivePane(msg.panes[0].pane_id, panes);
+                    }
+                } else if (msg.type === 'exit') {
+                    showBanner('Session ended.');
+                    setTimeout(() => { if (currentSession === sessionName) closeSession(); }, 3000);
+                }
+            } else {
+                // Binary frame: pane output.
+                const view = new DataView(evt.data);
+                if (view.getUint8(0) !== 0x01) return;
+                const idLen = view.getUint16(1, false);
+                const paneId = new TextDecoder().decode(new Uint8Array(evt.data, 3, idLen));
+                const payload = new Uint8Array(evt.data, 3 + idLen);
+
+                const entry = panes.get(paneId);
+                if (entry) {
+                    entry.terminal.write(payload);
+                }
+            }
+        });
+
+        ws.addEventListener('close', () => {
+            if (_paneGrid && _paneGrid.ws === ws) {
+                // Show reconnect hint only if still in session view.
+                if (currentSession === sessionName) {
+                    showBanner('Connection lost. Return to dashboard to reconnect.');
+                }
+            }
+        });
+
     } catch (err) {
         if (loadEpoch !== _terminalLoadEpoch) return;
         showBanner(`Failed to connect to session: ${err.message}`);
@@ -527,10 +747,7 @@ function closeSession() {
     _terminalLoadEpoch++;  // Invalidate any in-flight loadSessionTerminal.
     closeAllMenus();
 
-    if (_terminalHandle) {
-        _terminalHandle.dispose();
-        _terminalHandle = null;
-    }
+    disposePaneGrid();
 
     document.getElementById('session-view').classList.add('hidden');
     document.getElementById('dashboard-view').classList.remove('hidden');
