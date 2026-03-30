@@ -316,7 +316,7 @@ class ControlBridge:
         first_line = True
         try:
             async for raw_line in self._pty_reader:
-                line = raw_line.decode("utf-8", errors="replace").rstrip("\n")
+                line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
                 # Strip DCS envelope prefix from the first control mode line.
                 if first_line:
                     if line.startswith(self._DCS_PREFIX):
