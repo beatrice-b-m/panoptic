@@ -604,7 +604,7 @@ function applyLayout(paneList, paneMap, gridEl) {
 
             const terminal = new Terminal({
                 allowProposedApi: true,
-                fontFamily: '"SF Mono", Menlo, Consolas, monospace',
+                fontFamily: '"Hack Nerd Font Mono", "SF Mono", Menlo, Consolas, monospace',
                 fontSize: 13,
                 cursorBlink: true,
                 scrollback: 5000,
@@ -1001,7 +1001,7 @@ async function loadSessionTerminal(sessionName) {
 
         // Measure character cell size to compute cols/rows from grid container.
         const probe = document.createElement('span');
-        probe.style.cssText = 'position:absolute;visibility:hidden;white-space:pre;font-family:"SF Mono",Menlo,Consolas,monospace;font-size:13px;';
+        probe.style.cssText = 'position:absolute;visibility:hidden;white-space:pre;font-family:"Hack Nerd Font Mono","SF Mono",Menlo,Consolas,monospace;font-size:13px;';
         probe.textContent = 'W';
         document.body.appendChild(probe);
         const charWidth = probe.offsetWidth || 8;

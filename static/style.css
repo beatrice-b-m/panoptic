@@ -54,7 +54,7 @@
 
     /* Typography */
     --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', sans-serif;
-    --font-mono: 'SF Mono', 'Menlo', 'Consolas', monospace;
+    --font-mono: 'Hack Nerd Font Mono', 'SF Mono', 'Menlo', 'Consolas', monospace;
 
     /* Touch */
     --min-touch: 44px;
