@@ -76,9 +76,13 @@ class SessionManager:
         # Per-host runtime status
         self._host_status: dict[str, HostStatus] = {}
 
-        # Per-host snapshot caches: host_id -> {session_name -> (text, ts)}
-        self._snapshot_cache: dict[str, dict[str, tuple[str, float]]] = {}
+        # Per-host snapshot caches: host_id -> {session_name -> (text, ts, svg)}
+        # svg is pre-rendered by _render_svg; fresh cache hits skip re-rendering.
+        self._snapshot_cache: dict[str, dict[str, tuple[str, float, str]]] = {}
 
+        # Per-host sorted session views; None means dirty (re-sort on next read).
+        # Invalidated only when session set changes — not on field updates.
+        self._sorted_sessions_cache: dict[str, list | None] = {}
         self._poll_task: asyncio.Task | None = None
 
         # Resolve local binaries to absolute paths once so child processes do not
@@ -111,6 +115,7 @@ class SessionManager:
             self._host_sessions.setdefault(hid, {})
             self._host_status.setdefault(hid, HostStatus())
             self._snapshot_cache.setdefault(hid, {})
+            self._sorted_sessions_cache.setdefault(hid, None)
 
     def reload_hosts(self) -> None:
         """Re-sync after host config changes (add/remove)."""
@@ -138,6 +143,7 @@ class SessionManager:
     async def remove_host_sessions(self, host_id: str) -> None:
         self._host_sessions.pop(host_id, None)
         self._snapshot_cache.pop(host_id, None)
+        self._sorted_sessions_cache.pop(host_id, None)
 
     # ---------------------------------------------------------- tmux commands
 
@@ -277,6 +283,7 @@ class SessionManager:
                     host_id, returncode,
                 )
                 host_sessions.clear()
+                self._sorted_sessions_cache[host_id] = None
                 host_cache = self._snapshot_cache.get(host_id)
                 if host_cache:
                     host_cache.clear()
@@ -318,6 +325,8 @@ class SessionManager:
             host_cache = self._snapshot_cache.get(host_id)
             if host_cache:
                 host_cache.pop(gone, None)
+        if current - incoming:
+            self._sorted_sessions_cache[host_id] = None
 
         # Sessions that are new.
         for new in incoming - current:
@@ -329,6 +338,8 @@ class SessionManager:
                 attached=info["attached"],
                 created_epoch=info["created_epoch"],
             )
+        if incoming - current:
+            self._sorted_sessions_cache[host_id] = None
 
         # Existing sessions: update mutable fields.
         for name in current & incoming:
@@ -700,6 +711,7 @@ class SessionManager:
         host_cache = self._snapshot_cache.get(host_id)
         if host_cache:
             host_cache.pop(name, None)
+        self._sorted_sessions_cache[host_id] = None
 
         return {
             "name": name,
@@ -741,22 +753,25 @@ class SessionManager:
         if not parent.is_dir():
             return []
 
-        results: list[str] = []
+        names: list[str] = []
         try:
-            for entry in sorted(parent.iterdir()):
-                if entry.is_symlink():
-                    continue
-                if not entry.is_dir():
-                    continue
-                if partial and not entry.name.lower().startswith(partial.lower()):
-                    continue
-                results.append(str(entry) + "/")
-                if len(results) >= limit:
-                    break
+            # os.scandir yields lighter DirEntry objects than pathlib.iterdir.
+            # Filtering before sorting means we only sort the matching subset,
+            # which is typically much smaller than the full directory.
+            with os.scandir(parent) as it:
+                for de in it:
+                    if de.is_symlink():
+                        continue
+                    if not de.is_dir(follow_symlinks=False):
+                        continue
+                    if partial and not de.name.lower().startswith(partial.lower()):
+                        continue
+                    names.append(de.name)
         except PermissionError:
             return []
 
-        return results
+        names.sort()
+        return [str(parent / name) + "/" for name in names[:limit]]
 
     # --------------------------------------------------------- cleanup hook
 
@@ -857,7 +872,13 @@ class SessionManager:
             page_size = self._settings.session_page_size
         page_size = max(1, page_size)  # Defensive: prevent ZeroDivisionError
         host_sessions = self._host_sessions.get(host_id, {})
-        all_sessions = sorted(host_sessions.values(), key=lambda s: s.name)
+        # Use memoized sorted view; only re-sort when the session set changes.
+        sorted_cache = self._sorted_sessions_cache.get(host_id)
+        if sorted_cache is None:
+            all_sessions = sorted(host_sessions.values(), key=lambda s: s.name)
+            self._sorted_sessions_cache[host_id] = all_sessions
+        else:
+            all_sessions = sorted_cache
         total = len(all_sessions)
         pages = math.ceil(total / page_size) if total else 1
 
@@ -895,19 +916,22 @@ class SessionManager:
         host_cache = self._snapshot_cache.setdefault(host_id, {})
         cached = host_cache.get(session_name)
         if cached is not None:
-            text, ts = cached
+            text, ts, svg = cached
             if time.monotonic() - ts < SNAPSHOT_FRESHNESS_SECS:
-                return self._render_svg(text)
+                log.debug("Thumbnail cache hit for %s/%s", host_id, session_name)
+                return svg  # pre-rendered; no rebuild needed
 
         text = await self._capture_pane(host_id, session_name)
         if text is None:
-            # Capture failed — return stale cache if available, else fallback.
+            # Capture failed — return stale cached SVG if available, else fallback.
             if cached is not None:
-                return self._render_svg(cached[0])
+                return cached[2]  # stale svg
             return self._render_svg("(no snapshot available)")
 
-        host_cache[session_name] = (text, time.monotonic())
-        return self._render_svg(text)
+        log.debug("Thumbnail rendered for %s/%s", host_id, session_name)
+        svg = self._render_svg(text)
+        host_cache[session_name] = (text, time.monotonic(), svg)
+        return svg
 
     async def _capture_pane(
         self, host_id: str, session_name: str

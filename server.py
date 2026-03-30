@@ -757,8 +757,17 @@ async def handle_terminal_ws(request: web.Request) -> web.WebSocketResponse:
     bridges[bridge_key] = bridge
 
     relay_task: asyncio.Task | None = None
+    _bridge_start = time.monotonic()
     try:
+        log.debug(
+            "Opening bridge for %s/%s (cols=%d rows=%d)",
+            host_id, session_name, cols, rows,
+        )
         await bridge.start()
+        log.debug(
+            "Bridge started for %s/%s in %.0fms",
+            host_id, session_name, (time.monotonic() - _bridge_start) * 1000,
+        )
 
         async def relay_events():
             """Push bridge events to the browser."""
@@ -842,6 +851,11 @@ async def handle_terminal_ws(request: web.Request) -> web.WebSocketResponse:
             except asyncio.CancelledError:
                 pass
         await bridge.stop()
+        elapsed = time.monotonic() - _bridge_start
+        log.debug(
+            "Bridge closed for %s/%s after %.1fs",
+            host_id, session_name, elapsed,
+        )
         bridges.pop(bridge_key, None)
 
     return ws
