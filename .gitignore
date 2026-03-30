@@ -4,6 +4,7 @@
 logs/
 __pycache__/
 *.pyc
+.ttyd.pids
 
 .omp/
 
