@@ -412,6 +412,18 @@ async def handle_health(request: web.Request) -> web.Response:
         "uptime": round(uptime, 1),
     })
 
+async def handle_config(request: web.Request) -> web.Response:
+    """Return frontend display configuration derived from RuntimeSettings."""
+    settings: RuntimeSettings = request.app["settings"]
+    return web.json_response({
+        "terminal": {
+            "fontFamily":   settings.terminal_font_family,
+            "fontSize":     settings.terminal_font_size,
+            "cursorBlink":  settings.terminal_cursor_blink,
+            "scrollback":   settings.terminal_scrollback,
+        },
+    })
+
 
 async def handle_create_session(request: web.Request) -> web.Response:
     """Create a new tmux session on a host."""
@@ -990,6 +1002,7 @@ def build_app(settings: RuntimeSettings) -> web.Application:
 
     # Health
     app.router.add_get("/api/health", handle_health)
+    app.router.add_get("/api/config", handle_config)
 
     # Host-scoped session routes
     app.router.add_get(

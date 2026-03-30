@@ -18,6 +18,9 @@ BEAMUX_BINARY = os.getenv("BEAMUX_BINARY", "beamux")
 
 # Terminal font for dashboard terminals
 TERMINAL_FONT_FAMILY = os.getenv("TERMINAL_FONT_FAMILY", "'Hack Nerd Font', 'Hack Nerd Font Mono', Menlo, Consolas, monospace")
+TERMINAL_FONT_SIZE     = int(os.getenv("TERMINAL_FONT_SIZE", "13"))
+TERMINAL_CURSOR_BLINK = os.getenv("TERMINAL_CURSOR_BLINK", "true").lower() in ("1", "true", "yes")
+TERMINAL_SCROLLBACK   = int(os.getenv("TERMINAL_SCROLLBACK", "5000"))
 
 # Polling intervals (seconds)
 POLL_INTERVAL_ACTIVE = 5
@@ -74,6 +77,9 @@ class RuntimeSettings:
     tmux_binary: str = TMUX_BINARY
     beamux_binary: str = BEAMUX_BINARY
     terminal_font_family: str = TERMINAL_FONT_FAMILY
+    terminal_font_size:    int  = TERMINAL_FONT_SIZE
+    terminal_cursor_blink: bool = TERMINAL_CURSOR_BLINK
+    terminal_scrollback:   int  = TERMINAL_SCROLLBACK
     poll_interval_active: int = POLL_INTERVAL_ACTIVE
     poll_interval_idle: int = POLL_INTERVAL_IDLE
     client_active_timeout: int = CLIENT_ACTIVE_TIMEOUT

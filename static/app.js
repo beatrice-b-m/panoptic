@@ -47,6 +47,11 @@ const MACRO_VAR_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 // Allocated once at module level to avoid per-frame object churn.
 const _paneIdDecoder = new TextDecoder();
 
+// Terminal display configuration fetched from /api/config on page load.
+// _configReady is a Promise stored so loadSessionTerminal can await it.
+let _termConfig = null;
+let _configReady = null;
+
 // ---------------------------------------------------------------------------
 // Theme
 // ---------------------------------------------------------------------------
@@ -91,6 +96,21 @@ function toggleTheme() {
     const next = current === 'dark' ? 'light' : 'dark';
     applyTheme(next);
     localStorage.setItem('theme', next);
+}
+
+async function loadConfig() {
+    try {
+        const resp = await fetch('/api/config');
+        if (resp.ok) {
+            _termConfig = await resp.json();
+            // Keep UI mono labels (session names, path text, etc.) consistent
+            // with the configured terminal font.
+            const ff = _termConfig?.terminal?.fontFamily;
+            if (ff) document.documentElement.style.setProperty('--font-mono', ff);
+        }
+    } catch {
+        // Server unreachable at load time; terminals fall back to inline defaults.
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -602,12 +622,13 @@ function applyLayout(paneList, paneMap, gridEl) {
             el.dataset.paneId = p.pane_id;
             gridEl.appendChild(el);
 
+            const _tc = _termConfig?.terminal ?? {};
             const terminal = new Terminal({
                 allowProposedApi: true,
-                fontFamily: '"Hack Nerd Font Mono", "SF Mono", Menlo, Consolas, monospace',
-                fontSize: 13,
-                cursorBlink: true,
-                scrollback: 5000,
+                fontFamily:  _tc.fontFamily  ?? '"Hack Nerd Font Mono", "SF Mono", Menlo, Consolas, monospace',
+                fontSize:    _tc.fontSize    ?? 13,
+                cursorBlink: _tc.cursorBlink ?? true,
+                scrollback:  _tc.scrollback  ?? 5000,
                 theme: {
                     background: '#000000',
                     selectionBackground: 'rgba(68, 152, 255, 0.35)',
@@ -971,6 +992,8 @@ function disposePaneGrid() {
 async function loadSessionTerminal(sessionName) {
     // Dispose any previous pane grid.
     disposePaneGrid();
+    // Config must be resolved before applyLayout creates Terminal instances.
+    if (_configReady) await _configReady;
 
     const loadEpoch = ++_terminalLoadEpoch;
     const gridEl = document.getElementById('pane-grid');
@@ -1000,8 +1023,11 @@ async function loadSessionTerminal(sessionName) {
         hideBanner();
 
         // Measure character cell size to compute cols/rows from grid container.
+        const _pc = _termConfig?.terminal ?? {};
+        const _pff = _pc.fontFamily ?? '"Hack Nerd Font Mono", "SF Mono", Menlo, Consolas, monospace';
+        const _pfs = _pc.fontSize ?? 13;
         const probe = document.createElement('span');
-        probe.style.cssText = 'position:absolute;visibility:hidden;white-space:pre;font-family:"Hack Nerd Font Mono","SF Mono",Menlo,Consolas,monospace;font-size:13px;';
+        probe.style.cssText = `position:absolute;visibility:hidden;white-space:pre;font-family:${_pff};font-size:${_pfs}px;`;
         probe.textContent = 'W';
         document.body.appendChild(probe);
         const charWidth = probe.offsetWidth || 8;
@@ -2458,6 +2484,7 @@ window.addEventListener('popstate', () => {
 
 document.addEventListener('DOMContentLoaded', () => {
     // Theme
+    _configReady = loadConfig();
     initTheme();
     document.getElementById('theme-toggle').addEventListener('click', toggleTheme);
 
