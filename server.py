@@ -808,6 +808,14 @@ async def handle_terminal_ws(request: web.Request) -> web.WebSocketResponse:
                         continue
                     cols, rows = next_cols, next_rows
                     await bridge.resize(next_cols, next_rows)
+                elif msg_type == "resize_pane":
+                    pane_id = data.get("pane_id", "")
+                    try:
+                        p_cols = int(data["cols"])
+                        p_rows = int(data["rows"])
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    await bridge.resize_pane(pane_id, p_cols, p_rows)
             elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSE):
                 break
 

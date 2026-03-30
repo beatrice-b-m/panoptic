@@ -489,6 +489,12 @@ function applyLayout(paneList, paneMap, gridEl) {
     }
     if (maxCols === 0 || maxRows === 0) return;
 
+    // Store layout metadata for divider calculations.
+    if (_paneGrid) {
+        _paneGrid.layout = paneList;
+        _paneGrid.maxCols = maxCols;
+        _paneGrid.maxRows = maxRows;
+    }
 
     const incomingIds = new Set(paneList.map(p => p.pane_id));
 
@@ -585,8 +591,256 @@ function applyLayout(paneList, paneMap, gridEl) {
             if (entry.fitAddon) entry.fitAddon.fit();
         });
     }
+
+    // Render draggable dividers between adjacent panes.
+    renderDividers(paneList, maxCols, maxRows, gridEl);
 }
 
+
+// ---------------------------------------------------------------------------
+// Draggable pane dividers
+// ---------------------------------------------------------------------------
+
+// Minimum pane size in character cells.
+const MIN_PANE_CHARS = 4;
+
+// Half-width of the divider hit-area in pixels.
+const DIVIDER_HALF_PX = 3;
+
+/**
+ * Detect shared edges between panes and render draggable divider overlays.
+ * A divider exists where one pane's right edge equals another's left edge
+ * (vertical) or one pane's bottom edge equals another's top edge (horizontal).
+ */
+function renderDividers(paneList, maxCols, maxRows, gridEl) {
+    // Remove stale dividers.
+    gridEl.querySelectorAll('.pane-divider').forEach(el => el.remove());
+
+    if (paneList.length < 2) return;
+
+    // Build edge maps: for each coordinate, which panes border it.
+    // Vertical dividers: shared x-boundary between left-pane's right edge and right-pane's left edge.
+    // Horizontal dividers: shared y-boundary between top-pane's bottom edge and bottom-pane's top edge.
+    const dividers = findDividers(paneList);
+
+    for (const d of dividers) {
+        const el = document.createElement('div');
+        el.className = `pane-divider pane-divider-${d.axis}`;
+
+        if (d.axis === 'vertical') {
+            // Positioned at x-boundary, spanning the y-range.
+            const leftPct = (d.pos / maxCols) * 100;
+            const topPct = (d.spanStart / maxRows) * 100;
+            const heightPct = ((d.spanEnd - d.spanStart) / maxRows) * 100;
+            el.style.cssText = `left:${leftPct}%;top:${topPct}%;width:0;height:${heightPct}%;`;
+        } else {
+            // Positioned at y-boundary, spanning the x-range.
+            const topPct = (d.pos / maxRows) * 100;
+            const leftPct = (d.spanStart / maxCols) * 100;
+            const widthPct = ((d.spanEnd - d.spanStart) / maxCols) * 100;
+            el.style.cssText = `top:${topPct}%;left:${leftPct}%;height:0;width:${widthPct}%;`;
+        }
+
+        el.addEventListener('mousedown', (e) => startDividerDrag(e, d));
+        gridEl.appendChild(el);
+    }
+}
+
+/**
+ * Find all dividers — shared edges between pairs of adjacent panes.
+ * Returns array of { axis, pos, spanStart, spanEnd, before: [paneIds], after: [paneIds] }.
+ */
+function findDividers(paneList) {
+    const dividers = [];
+
+    // For each pair, check if they share an edge.
+    // Collect raw edges, then merge overlapping ones on the same axis+position.
+    const rawEdges = [];
+
+    for (let i = 0; i < paneList.length; i++) {
+        const a = paneList[i];
+        const aRight = a.x + a.cols;
+        const aBottom = a.y + a.rows;
+
+        for (let j = i + 1; j < paneList.length; j++) {
+            const b = paneList[j];
+            const bRight = b.x + b.cols;
+            const bBottom = b.y + b.rows;
+
+            // Vertical edge: a's right + 1 == b's left (1-cell tmux separator gap).
+            // The divider sits in the separator column between the two panes.
+            if (aRight + 1 === b.x) {
+                // Overlap in y-axis?
+                const yStart = Math.max(a.y, b.y);
+                const yEnd = Math.min(aBottom, bBottom);
+                if (yEnd > yStart) {
+                    rawEdges.push({ axis: 'vertical', pos: aRight, spanStart: yStart, spanEnd: yEnd, before: a.pane_id, after: b.pane_id });
+                }
+            } else if (bRight + 1 === a.x) {
+                const yStart = Math.max(a.y, b.y);
+                const yEnd = Math.min(aBottom, bBottom);
+                if (yEnd > yStart) {
+                    rawEdges.push({ axis: 'vertical', pos: bRight, spanStart: yStart, spanEnd: yEnd, before: b.pane_id, after: a.pane_id });
+                }
+            }
+
+            // Horizontal edge: a's bottom + 1 == b's top (1-row tmux separator gap).
+            if (aBottom + 1 === b.y) {
+                const xStart = Math.max(a.x, b.x);
+                const xEnd = Math.min(aRight, bRight);
+                if (xEnd > xStart) {
+                    rawEdges.push({ axis: 'horizontal', pos: aBottom, spanStart: xStart, spanEnd: xEnd, before: a.pane_id, after: b.pane_id });
+                }
+            } else if (bBottom + 1 === a.y) {
+                const xStart = Math.max(a.x, b.x);
+                const xEnd = Math.min(aRight, bRight);
+                if (xEnd > xStart) {
+                    rawEdges.push({ axis: 'horizontal', pos: bBottom, spanStart: xStart, spanEnd: xEnd, before: b.pane_id, after: a.pane_id });
+                }
+            }
+        }
+    }
+
+    // Group edges by (axis, pos) and merge into single dividers.
+    const key = (e) => `${e.axis}:${e.pos}`;
+    const groups = new Map();
+    for (const e of rawEdges) {
+        const k = key(e);
+        if (!groups.has(k)) groups.set(k, []);
+        groups.get(k).push(e);
+    }
+
+    for (const [, edges] of groups) {
+        const { axis, pos } = edges[0];
+        const spanStart = Math.min(...edges.map(e => e.spanStart));
+        const spanEnd = Math.max(...edges.map(e => e.spanEnd));
+        const before = [...new Set(edges.map(e => e.before))];
+        const after = [...new Set(edges.map(e => e.after))];
+        dividers.push({ axis, pos, spanStart, spanEnd, before, after });
+    }
+
+    return dividers;
+}
+
+/**
+ * Begin dragging a pane divider. We update pane positions locally during drag
+ * for immediate visual feedback, then send resize_pane commands to tmux on
+ * mouseup. tmux will respond with a %layout-change that reconciles.
+ */
+function startDividerDrag(mousedownEvent, divider) {
+    mousedownEvent.preventDefault();
+    mousedownEvent.stopPropagation();
+    if (!_paneGrid) return;
+
+    const gridEl = _paneGrid.gridEl;
+    const gridRect = gridEl.getBoundingClientRect();
+    const { charWidth, charHeight, layout, maxCols, maxRows, panes } = _paneGrid;
+    if (!layout || !charWidth || !charHeight) return;
+
+    // Build a mutable copy of the layout for local preview.
+    const localLayout = layout.map(p => ({ ...p }));
+    const paneById = new Map(localLayout.map(p => [p.pane_id, p]));
+
+    // Identify which panes sit on each side of this divider.
+    const beforePanes = divider.before.map(id => paneById.get(id)).filter(Boolean);
+    const afterPanes = divider.after.map(id => paneById.get(id)).filter(Boolean);
+
+    const startX = mousedownEvent.clientX;
+    const startY = mousedownEvent.clientY;
+    const isVertical = divider.axis === 'vertical';
+
+    // Track cumulative character-cell delta to avoid sub-cell jitter.
+    let accumDelta = 0;
+
+    const dividerEl = mousedownEvent.currentTarget;
+    dividerEl.classList.add('dragging');
+
+    // Prevent iframes from stealing mouse events during drag.
+    gridEl.classList.add('dragging-divider');
+    if (!isVertical) gridEl.classList.add('dragging-divider-horizontal');
+
+    function onMouseMove(e) {
+        const pixelDelta = isVertical
+            ? (e.clientX - startX) - accumDelta * charWidth
+            : (e.clientY - startY) - accumDelta * charHeight;
+
+        const cellSize = isVertical ? charWidth : charHeight;
+        const cellDelta = Math.trunc(pixelDelta / cellSize);
+        if (cellDelta === 0) return;
+
+        // Clamp delta so no pane goes below MIN_PANE_CHARS.
+        let clampedDelta = cellDelta;
+        if (isVertical) {
+            for (const p of beforePanes) clampedDelta = Math.min(clampedDelta, p.cols - MIN_PANE_CHARS);
+            for (const p of afterPanes) clampedDelta = Math.max(clampedDelta, -(p.cols - MIN_PANE_CHARS));
+        } else {
+            for (const p of beforePanes) clampedDelta = Math.min(clampedDelta, p.rows - MIN_PANE_CHARS);
+            for (const p of afterPanes) clampedDelta = Math.max(clampedDelta, -(p.rows - MIN_PANE_CHARS));
+        }
+        if (clampedDelta === 0) return;
+
+        accumDelta += clampedDelta;
+
+        // Update local pane geometry.
+        if (isVertical) {
+            for (const p of beforePanes) p.cols += clampedDelta;
+            for (const p of afterPanes) { p.x += clampedDelta; p.cols -= clampedDelta; }
+        } else {
+            for (const p of beforePanes) p.rows += clampedDelta;
+            for (const p of afterPanes) { p.y += clampedDelta; p.rows -= clampedDelta; }
+        }
+
+        // Re-render pane positions locally (no server round-trip).
+        for (const p of localLayout) {
+            const entry = panes.get(p.pane_id);
+            if (!entry) continue;
+            const left = (p.x / maxCols) * 100;
+            const top = (p.y / maxRows) * 100;
+            const width = (p.cols / maxCols) * 100;
+            const height = (p.rows / maxRows) * 100;
+            entry.el.style.cssText = `position:absolute;left:${left}%;top:${top}%;width:${width}%;height:${height}%;`;
+        }
+
+        // Refit terminals affected by the drag.
+        for (const p of [...beforePanes, ...afterPanes]) {
+            const entry = panes.get(p.pane_id);
+            if (entry?.fitAddon) entry.fitAddon.fit();
+        }
+
+        // Move the divider element too.
+        if (isVertical) {
+            dividerEl.style.left = `${(divider.pos + accumDelta) / maxCols * 100}%`;
+        } else {
+            dividerEl.style.top = `${(divider.pos + accumDelta) / maxRows * 100}%`;
+        }
+    }
+
+    function onMouseUp() {
+        document.removeEventListener('mousemove', onMouseMove);
+        document.removeEventListener('mouseup', onMouseUp);
+        dividerEl.classList.remove('dragging');
+        gridEl.classList.remove('dragging-divider');
+        gridEl.classList.remove('dragging-divider-horizontal');
+
+        if (accumDelta === 0) return;
+
+        // Send resize commands to tmux for each affected pane.
+        const ws = _paneGrid?.ws;
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+        for (const p of [...beforePanes, ...afterPanes]) {
+            ws.send(JSON.stringify({
+                type: 'resize_pane',
+                pane_id: p.pane_id,
+                cols: p.cols,
+                rows: p.rows,
+            }));
+        }
+    }
+
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+}
 function setActivePane(paneId, paneMap) {
     if (!_paneGrid) return;
     _paneGrid.activePaneId = paneId;
@@ -675,7 +929,7 @@ async function loadSessionTerminal(sessionName) {
 
         const panes = new Map();
 
-        _paneGrid = { ws, panes, gridEl, resizeObserver: null, activePaneId: null };
+        _paneGrid = { ws, panes, gridEl, resizeObserver: null, activePaneId: null, charWidth, charHeight, layout: null };
 
         ws.addEventListener('open', () => {
             // Resize observer: send resize on container change.

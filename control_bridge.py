@@ -341,6 +341,10 @@ class ControlBridge:
         self.rows = rows
         await self._send_command(f"refresh-client -C {cols},{rows}")
 
+    async def resize_pane(self, pane_id: str, cols: int, rows: int) -> None:
+        """Resize an individual tmux pane to the given character dimensions."""
+        await self._send_command(f"resize-pane -t {pane_id} -x {cols} -y {rows}")
+
     async def stop(self) -> None:
         """Terminate the subprocess and release PTY resources."""
         if self._reader_task and not self._reader_task.done():

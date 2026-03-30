@@ -667,6 +667,69 @@ button {
     overflow: hidden !important;
 }
 
+/* ─── Pane dividers (draggable) ──────────────────────────────────────────── */
+
+.pane-divider {
+    position: absolute;
+    z-index: 10;
+    box-sizing: border-box;
+}
+
+/* Vertical divider: thin line between left/right panes. */
+.pane-divider-vertical {
+    cursor: col-resize;
+    /* Expand hit-area: 6px wide, centered on the edge. */
+    margin-left: -3px;
+    padding: 0 3px;
+    width: 6px;
+    /* The visible line is via a pseudo-element for a tight 1px visual. */
+}
+.pane-divider-vertical::after {
+    content: '';
+    display: block;
+    width: 1px;
+    height: 100%;
+    margin: 0 auto;
+    background: transparent;
+    transition: background 0.12s;
+}
+.pane-divider-vertical:hover::after,
+.pane-divider-vertical.dragging::after {
+    background: var(--accent, hsl(207, 90%, 64%));
+}
+
+/* Horizontal divider: thin line between top/bottom panes. */
+.pane-divider-horizontal {
+    cursor: row-resize;
+    margin-top: -3px;
+    padding: 3px 0;
+    height: 6px;
+}
+.pane-divider-horizontal::after {
+    content: '';
+    display: block;
+    height: 1px;
+    width: 100%;
+    margin: auto 0;
+    background: transparent;
+    transition: background 0.12s;
+}
+.pane-divider-horizontal:hover::after,
+.pane-divider-horizontal.dragging::after {
+    background: var(--accent, hsl(207, 90%, 64%));
+}
+
+/* While dragging, prevent iframes from stealing mouse events. */
+.pane-grid.dragging-divider .pane-cell {
+    pointer-events: none;
+}
+.pane-grid.dragging-divider {
+    cursor: col-resize;
+}
+.pane-grid.dragging-divider-horizontal {
+    cursor: row-resize;
+}
+
 /* ─── Modal ─────────────────────────────────────────────────────────────────── */
 
 .modal-backdrop {
