@@ -625,6 +625,11 @@ function applyLayout(paneList, paneMap, gridEl) {
             const _tc = _termConfig?.terminal ?? {};
             const terminal = new Terminal({
                 allowProposedApi: true,
+                // convertEol: treat bare \n as \r\n. Raw-mode processes inside tmux
+                // panes (OMP, TUI apps, stty -opost) write bare \n bytes that pass
+                // through %output without conversion. Without convertEol xterm.js
+                // only advances the cursor downward, causing stairstepping.
+                convertEol: true,
                 fontFamily:  _tc.fontFamily  ?? '"Hack Nerd Font Mono", "SF Mono", Menlo, Consolas, monospace',
                 fontSize:    _tc.fontSize    ?? 13,
                 cursorBlink: _tc.cursorBlink ?? true,
