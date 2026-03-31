@@ -316,6 +316,33 @@ class ControlBridge:
         first_line = True
         try:
             async for raw_line in self._pty_reader:
+                # Fast path for %output: process the payload at bytes level,
+                # bypassing the decode('utf-8', errors='replace') roundtrip.
+                #
+                # tmux passes bytes >= 0x80 through %output unescaped (only
+                # bytes < 0x20 and '\' are octal-encoded).  When a process
+                # inside a pane writes a multi-byte UTF-8 sequence and tmux's
+                # read() returns it in fragments across two calls, each
+                # resulting %output line ends with an *incomplete* byte
+                # sequence before its CRLF terminator.  decode('utf-8',
+                # errors='replace') silently replaces each orphaned byte with
+                # U+FFFD, which then re-encodes as \xef\xbf\xbd — three
+                # replacement characters in xterm.js where one glyph belonged.
+                #
+                # Staying at bytes level forwards the raw (possibly split)
+                # bytes to xterm.js whose own stateful UTF-8 decoder reassembles
+                # them correctly across Terminal.write() calls.
+                if raw_line.startswith(b"%output "):
+                    parts = raw_line.rstrip(b"\r\n").split(b" ", 2)
+                    if len(parts) == 3:
+                        await self._event_queue.put({
+                            "type": "output",
+                            "pane_id": parts[1].decode("ascii"),
+                            "data": _OCTAL_RE.sub(
+                                lambda m: bytes([int(m.group(1), 8)]), parts[2]
+                            ),
+                        })
+                    continue
                 line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
                 # Strip DCS envelope prefix from the first control mode line.
                 if first_line:

@@ -296,6 +296,28 @@ async def _feed_lines(bridge: ControlBridge, lines: list[str]) -> list[dict]:
     return events
 
 
+async def _feed_bytes_lines(bridge: ControlBridge, raw_lines: list[bytes]) -> list[dict]:
+    """Feed raw byte sequences into the bridge's reader and collect all events.
+
+    Identical to ``_feed_lines`` but accepts bytes directly so callers can feed
+    payloads with embedded high bytes (>= 0x80) without UTF-8 encoding them.
+    """
+    reader = asyncio.StreamReader()
+    for line in raw_lines:
+        reader.feed_data(line + b"\n")
+    reader.feed_eof()
+
+    bridge._pty_reader = reader
+    await bridge._read_loop()
+
+    events: list[dict] = []
+    while not bridge._event_queue.empty():
+        ev = bridge._event_queue.get_nowait()
+        if ev["type"] != "exit":
+            events.append(ev)
+    return events
+
+
 class TestReadLoopResponseTracking:
     """Tests for %begin/%end handling and capture-pane synthetic output."""
 
@@ -429,6 +451,53 @@ class TestReadLoopResponseTracking:
         events = asyncio.run(_feed_lines(bridge, lines))
         assert events == []
 
+
+    def test_output_raw_utf8_bytes_preserved(self):
+        """Raw UTF-8 bytes in %output payloads are forwarded without corruption.
+
+        tmux passes bytes >= 0x80 through %output unescaped.  The fast path
+        must forward them as-is; the old decode/encode roundtrip would corrupt
+        any byte sequence that tmux splits across PTY read() boundaries.
+        """
+        bridge = _make_bridge()
+        # ─ is U+2500, UTF-8: \xe2\x94\x80
+        events = asyncio.run(_feed_bytes_lines(bridge, [b"%output %0 \xe2\x94\x80"]))
+        assert len(events) == 1
+        assert events[0]["pane_id"] == "%0"
+        assert events[0]["data"] == b"\xe2\x94\x80", "raw UTF-8 bytes must not be corrupted"
+
+    def test_output_split_utf8_not_replaced_with_fffd(self):
+        """Partial UTF-8 sequences split across %output events forward raw bytes.
+
+        If tmux's PTY read() returns \xe2 in one call and \x94\x80 in the next,
+        both %output events must carry the raw bytes — not U+FFFD (\xef\xbf\xbd)
+        which the old decode/encode roundtrip would have substituted.
+        """
+        bridge = _make_bridge()
+        events = asyncio.run(_feed_bytes_lines(bridge, [
+            b"%output %0 \xe2",
+            b"%output %0 \x94\x80",
+        ]))
+        assert len(events) == 2
+        assert events[0]["data"] == b"\xe2", "first fragment must not become U+FFFD"
+        assert events[1]["data"] == b"\x94\x80", "continuation bytes must not become U+FFFD"
+        # Concatenated they form the correct UTF-8 encoding of ─ (U+2500).
+        assert events[0]["data"] + events[1]["data"] == b"\xe2\x94\x80"
+
+    def test_output_mixed_octal_and_raw_utf8(self):
+        """Octal-escaped bytes and raw UTF-8 in the same payload are both handled.
+
+        tmux octal-escapes bytes < 0x20 (e.g. ESC as \\033) while passing
+        bytes >= 0x80 through as raw UTF-8.  Both must survive the fast path.
+        """
+        bridge = _make_bridge()
+        # \033 is octal-escaped ESC; \xe2\x95\xad is raw UTF-8 for ╭ (U+256D)
+        events = asyncio.run(_feed_bytes_lines(bridge, [
+            b"%output %0 \\033[32m\xe2\x95\xad\\033[0m",
+        ]))
+        assert len(events) == 1
+        # ESC + [32m + ╭ (raw UTF-8) + ESC + [0m
+        assert events[0]["data"] == b"\x1b[32m\xe2\x95\xad\x1b[0m"
 
 class TestTriggerInitialRedraw:
     """Tests for the resize-bounce initial-redraw trigger."""
