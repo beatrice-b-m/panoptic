@@ -221,6 +221,13 @@ class ControlBridge:
     # terminal.  The prefix appears exactly once, at the start of the stream.
     _DCS_PREFIX = "\x1bP1000p"
 
+    # tmux control-mode command input is line-oriented and effectively bounded
+    # (around 1 KiB per command line including trailing newline). Large
+    # send-keys -H payloads must be split or tmux drops/truncates the command.
+    _TMUX_CONTROL_MAX_INPUT_BYTES = 1024
+    # Keep chunks comfortably below parser limits to avoid edge-case truncation
+    # across tmux versions and transport paths (local PTY, ssh -t, etc.).
+    _SEND_KEYS_TARGET_CHUNK_BYTES = 256
     def __init__(
         self,
         session_name: str,
@@ -408,8 +415,14 @@ class ControlBridge:
         num = self._cmd_counter
         self._cmd_counter += 1
         if self._master_fd is not None:
+            payload = (cmd + "\n").encode()
+            view = memoryview(payload)
             try:
-                os.write(self._master_fd, (cmd + "\n").encode())
+                while view:
+                    written = os.write(self._master_fd, view)
+                    if written <= 0:
+                        break
+                    view = view[written:]
             except OSError:
                 pass  # PTY closed or process dead — stop() will clean up.
         return num
@@ -451,9 +464,26 @@ class ControlBridge:
         await self._send_command(f"refresh-client -C {self.cols + 1},{self.rows}")
         await self._send_command(f"refresh-client -C {self.cols},{self.rows}")
     async def send_keys(self, pane_id: str, data: bytes) -> None:
-        """Forward raw bytes from the browser to a specific pane via hex encoding."""
-        hex_bytes = " ".join(f"{b:02x}" for b in data)
-        await self._send_command(f"send-keys -t {pane_id} -H {hex_bytes}")
+        """Forward raw bytes from the browser to a specific pane via hex encoding.
+
+        tmux control mode reads one command line at a time and rejects oversized
+        lines.  Each -H byte costs 2 hex chars plus one separator space (except
+        the final token), so long pastes are chunked into multiple send-keys
+        commands to avoid truncation.
+        """
+        if not data:
+            return
+
+        cmd_prefix = f"send-keys -t {pane_id} -H "
+        max_payload_chars = self._TMUX_CONTROL_MAX_INPUT_BYTES - len(cmd_prefix) - 1
+        # payload length for N bytes is 3*N-1 ("aa bb cc").
+        line_limited_chunk = max(1, (max_payload_chars + 1) // 3)
+        max_bytes_per_chunk = min(self._SEND_KEYS_TARGET_CHUNK_BYTES, line_limited_chunk)
+
+        for offset in range(0, len(data), max_bytes_per_chunk):
+            chunk = data[offset:offset + max_bytes_per_chunk]
+            hex_bytes = " ".join(f"{b:02x}" for b in chunk)
+            await self._send_command(f"{cmd_prefix}{hex_bytes}")
 
     async def select_pane(self, pane_id: str) -> None:
         """Focus a pane (browser-side click)."""

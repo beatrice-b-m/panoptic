@@ -7,6 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
+import control_bridge
 from control_bridge import (
     PaneGeometry,
     parse_control_line,
@@ -498,6 +499,99 @@ class TestReadLoopResponseTracking:
         assert len(events) == 1
         # ESC + [32m + ╭ (raw UTF-8) + ESC + [0m
         assert events[0]["data"] == b"\x1b[32m\xe2\x95\xad\x1b[0m"
+
+class TestSendKeysChunking:
+    """Tests for send_keys command splitting in tmux control mode."""
+
+    def test_empty_payload_sends_no_command(self):
+        bridge = _make_bridge()
+        commands: list[str] = []
+
+        async def _run() -> None:
+            async def _capture(cmd: str) -> int:
+                commands.append(cmd)
+                return 0
+
+            bridge._send_command = _capture  # type: ignore[method-assign]
+            await bridge.send_keys("%0", b"")
+
+        asyncio.run(_run())
+        assert commands == []
+
+    def test_small_payload_uses_single_send_keys_command(self):
+        bridge = _make_bridge()
+        commands: list[str] = []
+
+        async def _run() -> None:
+            async def _capture(cmd: str) -> int:
+                commands.append(cmd)
+                return 0
+
+            bridge._send_command = _capture  # type: ignore[method-assign]
+            await bridge.send_keys("%42", b"abc\r")
+
+        asyncio.run(_run())
+        assert commands == ["send-keys -t %42 -H 61 62 63 0d"]
+
+    def test_large_payload_is_chunked_without_data_loss(self):
+        bridge = _make_bridge()
+        pane_id = "%12345"
+        commands: list[str] = []
+
+        cmd_prefix = f"send-keys -t {pane_id} -H "
+        max_payload_chars = bridge._TMUX_CONTROL_MAX_INPUT_BYTES - len(cmd_prefix) - 1
+        line_limited_chunk = (max_payload_chars + 1) // 3
+        max_bytes_per_chunk = min(bridge._SEND_KEYS_TARGET_CHUNK_BYTES, line_limited_chunk)
+        payload = bytes((i % 256) for i in range(max_bytes_per_chunk * 2 + 37))
+
+        async def _run() -> None:
+            async def _capture(cmd: str) -> int:
+                commands.append(cmd)
+                return 0
+
+            bridge._send_command = _capture  # type: ignore[method-assign]
+            await bridge.send_keys(pane_id, payload)
+
+        asyncio.run(_run())
+        assert len(commands) == 3
+
+        reconstructed = b""
+        for cmd in commands:
+            assert cmd.startswith(cmd_prefix)
+            # tmux line parser limit applies to the command plus trailing newline.
+            assert len((cmd + "\n").encode("utf-8")) <= bridge._TMUX_CONTROL_MAX_INPUT_BYTES
+            chunk_hex = cmd[len(cmd_prefix):]
+            assert chunk_hex
+            reconstructed += bytes.fromhex(chunk_hex)
+
+        assert reconstructed == payload
+
+        chunk_sizes = [len(cmd[len(cmd_prefix):].split(" ")) for cmd in commands]
+        assert chunk_sizes[:2] == [max_bytes_per_chunk, max_bytes_per_chunk]
+        assert chunk_sizes[2] == 37
+
+
+class TestSendCommandWrites:
+    """Tests for low-level command write reliability."""
+
+    def test_send_command_handles_partial_writes(self, monkeypatch):
+        bridge = _make_bridge()
+        bridge._master_fd = 123
+        chunks: list[bytes] = []
+
+        def fake_write(fd: int, data) -> int:
+            assert fd == 123
+            part = bytes(data)[:2]
+            chunks.append(part)
+            return len(part)
+
+        monkeypatch.setattr(control_bridge.os, "write", fake_write)
+        cmd_num = asyncio.run(bridge._send_command("display-message hello"))
+
+        assert cmd_num == 0
+        assert bridge._cmd_counter == 1
+        assert b"".join(chunks) == b"display-message hello\n"
+
 
 class TestTriggerInitialRedraw:
     """Tests for the resize-bounce initial-redraw trigger."""
