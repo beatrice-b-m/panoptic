@@ -677,12 +677,19 @@ function applyLayout(paneList, paneMap, gridEl) {
 
             // Click to focus pane.
             el.addEventListener('mousedown', () => {
-                if (_paneGrid && _paneGrid.activePaneId !== p.pane_id) {
+                if (!_paneGrid) return;
+
+                if (_paneGrid.activePaneId !== p.pane_id) {
                     setActivePane(p.pane_id, paneMap);
                     if (_paneGrid.ws.readyState === WebSocket.OPEN) {
                         _paneGrid.ws.send(JSON.stringify({ type: 'select_pane', pane_id: p.pane_id }));
                     }
+                    return;
                 }
+
+                // Keep the xterm helper textarea focused so keyboard paste
+                // (Cmd/Ctrl+V) reaches the active pane even after UI clicks.
+                terminal.focus();
             });
 
             entry = { terminal, fitAddon, el };
@@ -966,6 +973,27 @@ function setActivePane(paneId, paneMap) {
     }
     const active = paneMap.get(paneId);
     if (active) active.terminal.focus();
+}
+
+function handleSessionPaste(event) {
+    if (!currentSession || !_paneGrid || !_paneGrid.activePaneId) return;
+
+    const target = event.target;
+    if (target instanceof Element) {
+        // Respect regular form fields and xterm's own focused paste path.
+        if (target.closest('input, textarea, select, [contenteditable=""], [contenteditable="true"]')) return;
+        if (target.closest('.xterm')) return;
+    }
+
+    const text = event.clipboardData?.getData('text/plain');
+    if (!text) return;
+
+    const entry = _paneGrid.panes.get(_paneGrid.activePaneId);
+    if (!entry) return;
+
+    event.preventDefault();
+    entry.terminal.paste(text);
+    entry.terminal.focus();
 }
 
 function disposePaneGrid() {
@@ -2593,6 +2621,10 @@ document.addEventListener('DOMContentLoaded', () => {
     document.addEventListener('click', () => {
         closeAllMenus();
     });
+
+    // Global: when session view is active, route paste back to the active pane
+    // if focus drifted away from xterm's hidden textarea.
+    document.addEventListener('paste', handleSessionPaste);
 
     // Global: Escape key closes modals and menus
     document.addEventListener('keydown', (e) => {
